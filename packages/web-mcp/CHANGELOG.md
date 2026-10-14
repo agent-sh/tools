@@ -1,5 +1,13 @@
 # @agent-sh/harness-web-mcp
 
+## 0.1.1
+
+### Patch Changes
+
+- Updated dependencies [f233528]
+  - @agent-sh/harness-websearch@0.8.1
+  - @agent-sh/harness-webfetch@0.8.1
+
 ## 0.1.0
 
 ### Minor Changes

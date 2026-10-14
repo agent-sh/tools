@@ -1,5 +1,11 @@
 # @agent-sh/harness-websearch
 
+## 0.8.1
+
+### Patch Changes
+
+- f233528: README: point to `@agent-sh/harness-web-mcp` for using the tool from Claude Code or Codex with one `mcp add` command.
+
 ## 0.8.0
 
 ### Minor Changes
