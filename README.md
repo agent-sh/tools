@@ -22,6 +22,7 @@ src/permissions.ts
 
 - [Packages](#packages)
 - [Install](#install)
+- [Web search and fetch in Claude Code and Codex](#web-search-and-fetch-in-claude-code-and-codex)
 - [Use it in an agent loop](#use-it-in-an-agent-loop)
 - [Permissions](#permissions)
 - [Design principles](#design-principles)
@@ -43,6 +44,7 @@ src/permissions.ts
 | websearch | [`@agent-sh/harness-websearch`](./packages/websearch) | Web search with **no API key and no setup** (Exa → Parallel → Mojeek → Marginalia → Wikipedia), optionally Brave, Tavily or self-hosted SearXNG. When one engine comes up short, results from several are merged and ranked. |
 | lsp | [`@agent-sh/harness-lsp`](./packages/lsp) | Language-server hover, definition, references, implementation and symbols, with 1-indexed positions and retry hints while the server starts. |
 | skill | [`@agent-sh/harness-skill`](./packages/skill) | [Agent Skills](https://agentskills.io) `SKILL.md` activation with progressive disclosure and trust-gated project skills. |
+| web-mcp | [`@agent-sh/harness-web-mcp`](./packages/web-mcp) | MCP server exposing `websearch` and `webfetch` to Claude Code, Codex and any MCP client. |
 | core | [`@agent-sh/harness-core`](./packages/core) | Shared result types, errors, permission policy, read ledger and adapters. Every tool builds on it. |
 | **all** | [`@agent-sh/harness-tools`](./packages/tools) | Everything above under one import, plus a [pi](https://github.com/earendil-works/pi) coding-agent extension. |
 
@@ -54,6 +56,40 @@ npm install @agent-sh/harness-websearch    # or just the tools you need
 ```
 
 Node.js ≥ 20. ESM and CommonJS builds, with TypeScript types.
+
+## Web search and fetch in Claude Code and Codex
+
+The fastest way to use these tools needs no code. [`@agent-sh/harness-web-mcp`](./packages/web-mcp) serves `websearch` and `webfetch` over MCP, and search works with no API key.
+
+**Claude Code**
+
+```sh
+claude mcp add -s user harness-web -- npx -y @agent-sh/harness-web-mcp
+```
+
+**Codex**
+
+```sh
+codex mcp add harness-web -- npx -y @agent-sh/harness-web-mcp
+```
+
+Restart the agent (in Claude Code, `/mcp` reconnects) and ask it to search the web. The tools appear as `mcp__harness-web__websearch` / `mcp__harness-web__webfetch` in Claude Code and under `harness-web` in Codex.
+
+Optional upgrades are environment variables passed at registration, for example a free Brave key for broader search:
+
+```sh
+claude mcp add -s user harness-web -e BRAVE_API_KEY=... -- npx -y @agent-sh/harness-web-mcp
+codex mcp add harness-web --env BRAVE_API_KEY=... -- npx -y @agent-sh/harness-web-mcp
+```
+
+| Variable | Effect |
+|---|---|
+| `BRAVE_API_KEY` / `TAVILY_API_KEY` | That engine leads the search chain; the keyless chain stays as fallback. |
+| `EXA_API_KEY` / `PARALLEL_API_KEY` | Raise those engines' keyless rate limits. |
+| `SEARXNG_URL` | Use a self-hosted SearXNG first, e.g. `http://127.0.0.1:8888`. |
+| `HARNESS_WEB_FETCH_ALLOW_LOOPBACK=1` / `HARNESS_WEB_FETCH_ALLOW_PRIVATE=1` | Let `webfetch` reach localhost / private networks (blocked by default). |
+
+Config-file setups (`~/.claude.json`, `.mcp.json`, `~/.codex/config.toml`) and a global install are in the [package README](./packages/web-mcp#readme).
 
 ## Use it in an agent loop
 
