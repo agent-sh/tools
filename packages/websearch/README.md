@@ -6,14 +6,14 @@ Part of the [`@agent-sh/harness-*`](https://github.com/agent-sh/tools) monorepo 
 
 ## Use from Claude Code or Codex (no code)
 
-[`@agent-sh/harness-web-mcp`](../web-mcp) serves this tool (together with `webfetch`) over MCP:
+[`@agent-sh/harness-web-mcp`](https://www.npmjs.com/package/@agent-sh/harness-web-mcp) serves this tool (together with `webfetch`) over MCP:
 
 ```sh
 claude mcp add -s user harness-web -- npx -y @agent-sh/harness-web-mcp
 codex mcp add harness-web -- npx -y @agent-sh/harness-web-mcp
 ```
 
-Search works with no API key. Add a Brave, Tavily or SearXNG backend with an env var, e.g. `-e BRAVE_API_KEY=...` (Claude Code) or `--env BRAVE_API_KEY=...` (Codex). See the [web-mcp README](../web-mcp#readme) for configuration and config-file setups.
+Search works with no API key. Add a Brave, Tavily or SearXNG backend with an env var, e.g. `-e BRAVE_API_KEY=...` (Claude Code) or `--env BRAVE_API_KEY=...` (Codex). See the [web-mcp README](https://github.com/agent-sh/tools/tree/main/packages/web-mcp#readme) for configuration and config-file setups.
 
 ## Install
 

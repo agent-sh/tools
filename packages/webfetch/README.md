@@ -6,14 +6,14 @@ Part of the [`@agent-sh/harness-*`](https://github.com/agent-sh/tools) monorepo 
 
 ## Use from Claude Code or Codex (no code)
 
-[`@agent-sh/harness-web-mcp`](../web-mcp) serves this tool (together with `websearch`) over MCP:
+[`@agent-sh/harness-web-mcp`](https://www.npmjs.com/package/@agent-sh/harness-web-mcp) serves this tool (together with `websearch`) over MCP:
 
 ```sh
 claude mcp add -s user harness-web -- npx -y @agent-sh/harness-web-mcp
 codex mcp add harness-web -- npx -y @agent-sh/harness-web-mcp
 ```
 
-SSRF defenses stay on; `HARNESS_WEB_FETCH_ALLOW_LOOPBACK=1` opts into localhost. See the [web-mcp README](../web-mcp#readme) for configuration and config-file setups.
+SSRF defenses stay on; `HARNESS_WEB_FETCH_ALLOW_LOOPBACK=1` opts into localhost. See the [web-mcp README](https://github.com/agent-sh/tools/tree/main/packages/web-mcp#readme) for configuration and config-file setups.
 
 ## Install
 
