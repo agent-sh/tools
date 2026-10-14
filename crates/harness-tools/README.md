@@ -2,7 +2,7 @@
 
 Umbrella crate re-exporting every `harness-*` AI agent tool under one dependency.
 
-Rust port of [`@agent-sh/harness-tools`](https://www.npmjs.com/package/@agent-sh/harness-tools). Part of the [`harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context and the full tool surface.
+Rust port of [`@agent-sh/harness-tools`](https://www.npmjs.com/package/@agent-sh/harness-tools). Part of the [`harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context and the full tool surface.
 
 ## Install
 

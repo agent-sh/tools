@@ -18,4 +18,4 @@ pub const MAX_SNIPPET_CAP: usize = 600;
 /// Identifies as an agent tool with a contact URL — verified accepted (no
 /// anti-bot challenge) by Mojeek and the MediaWiki API.
 pub const DEFAULT_USER_AGENT: &str =
-    "agent-sh-harness-websearch/0.2.0 (+https://github.com/avifenesh/tools)";
+    "agent-sh-harness-websearch/0.2.0 (+https://github.com/agent-sh/tools)";

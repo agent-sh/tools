@@ -2,7 +2,7 @@
 
 Shared foundation for `@agent-sh/harness-*` tools — types, errors, permission policies, operation adapters.
 
-Part of the [`@agent-sh/harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context and the full tool surface.
+Part of the [`@agent-sh/harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context and the full tool surface.
 
 ## What it is
 

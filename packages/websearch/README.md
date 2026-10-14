@@ -2,7 +2,7 @@
 
 Web search for AI agent harnesses — **works with no API key and no setup**. With nothing configured it queries a bundled keyless fallback chain (Exa → Parallel → Mojeek → Marginalia → Wikipedia) and returns the first backend that has results. Exa and Parallel run their own web indexes and are reached through their official keyless MCP endpoints. Optionally upgrade to Brave/Tavily (API key) or a self-hosted SearXNG for higher coverage — same tool, same output. Tool-layer SSRF defense, declarative provider-neutral query controls, a result-count cap, engine provenance, and a discriminated result surface.
 
-Part of the [`@agent-sh/harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context and the full tool surface. WebSearch finds URLs; [`webfetch`](../webfetch) reads them. They compose.
+Part of the [`@agent-sh/harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context and the full tool surface. WebSearch finds URLs; [`webfetch`](../webfetch) reads them. They compose.
 
 ## Install
 
@@ -52,7 +52,7 @@ Notes:
 
 ## Contract
 
-The full contract — input shape, output discriminated-union, error codes, permission model, and acceptance tests — lives in [`agent-knowledge/design/websearch.md`](https://github.com/avifenesh/tools/blob/main/agent-knowledge/design/websearch.md). Changes to this package must stay in sync with that spec.
+The full contract — input shape, output discriminated-union, error codes, permission model, and acceptance tests — lives in [`agent-knowledge/design/websearch.md`](https://github.com/agent-sh/tools/blob/main/agent-knowledge/design/websearch.md). Changes to this package must stay in sync with that spec.
 
 ## License
 

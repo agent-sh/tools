@@ -19,7 +19,7 @@ members = [
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
-repository = "https://github.com/avifenesh/tools"
+repository = "https://github.com/agent-sh/tools"
 
 [workspace.dependencies]
 # Shared dependency versions across all harness-* crates.

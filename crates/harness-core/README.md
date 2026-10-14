@@ -2,7 +2,7 @@
 
 Shared foundation for `harness-*` Rust tools — types, errors, permission policies.
 
-Rust port of [`@agent-sh/harness-core`](https://www.npmjs.com/package/@agent-sh/harness-core). Part of the [`harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context.
+Rust port of [`@agent-sh/harness-core`](https://www.npmjs.com/package/@agent-sh/harness-core). Part of the [`harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context.
 
 ## Install
 

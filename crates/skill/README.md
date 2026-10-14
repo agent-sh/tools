@@ -2,7 +2,7 @@
 
 Authored [Agent Skills](https://agentskills.io) activation with progressive disclosure, permission-gated activation, trust-gated project skills.
 
-Rust port of [`@agent-sh/harness-skill`](https://www.npmjs.com/package/@agent-sh/harness-skill). Part of the [`harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context.
+Rust port of [`@agent-sh/harness-skill`](https://www.npmjs.com/package/@agent-sh/harness-skill). Part of the [`harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context.
 
 ## Install
 
@@ -34,7 +34,7 @@ let r = skill(json!({ "name": "api-conventions" }), &session).await;
 
 ## Contract
 
-The full contract lives in [`agent-knowledge/design/skill.md`](https://github.com/avifenesh/tools/blob/main/agent-knowledge/design/skill.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-skill`](https://www.npmjs.com/package/@agent-sh/harness-skill).
+The full contract lives in [`agent-knowledge/design/skill.md`](https://github.com/agent-sh/tools/blob/main/agent-knowledge/design/skill.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-skill`](https://www.npmjs.com/package/@agent-sh/harness-skill).
 
 ## License
 

@@ -2,7 +2,7 @@
 
 Atomic file write + edit + multi-edit with read-before-edit ledger, OLD_STRING_NOT_UNIQUE match locations, fuzzy candidate suggestions.
 
-Rust port of [`@agent-sh/harness-write`](https://www.npmjs.com/package/@agent-sh/harness-write). Part of the [`harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context.
+Rust port of [`@agent-sh/harness-write`](https://www.npmjs.com/package/@agent-sh/harness-write). Part of the [`harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context.
 
 ## Install
 
@@ -41,7 +41,7 @@ future major release — migrate to `multi_edit`.
 
 ## Contract
 
-The full contract lives in [`agent-knowledge/design/write.md`](https://github.com/avifenesh/tools/blob/main/agent-knowledge/design/write.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-write`](https://www.npmjs.com/package/@agent-sh/harness-write).
+The full contract lives in [`agent-knowledge/design/write.md`](https://github.com/agent-sh/tools/blob/main/agent-knowledge/design/write.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-write`](https://www.npmjs.com/package/@agent-sh/harness-write).
 
 ## License
 

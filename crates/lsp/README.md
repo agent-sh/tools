@@ -2,7 +2,7 @@
 
 Language-server operations (hover, definition, references, symbols, implementation) with 1-indexed positions and `server_starting` retry hints.
 
-Rust port of [`@agent-sh/harness-lsp`](https://www.npmjs.com/package/@agent-sh/harness-lsp). Part of the [`harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context.
+Rust port of [`@agent-sh/harness-lsp`](https://www.npmjs.com/package/@agent-sh/harness-lsp). Part of the [`harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context.
 
 ## Install
 
@@ -28,7 +28,7 @@ let r = lsp(json!({ "operation": "hover", "path": "src/a.ts", "line": 5, "charac
 
 ## Contract
 
-The full contract lives in [`agent-knowledge/design/lsp.md`](https://github.com/avifenesh/tools/blob/main/agent-knowledge/design/lsp.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-lsp`](https://www.npmjs.com/package/@agent-sh/harness-lsp).
+The full contract lives in [`agent-knowledge/design/lsp.md`](https://github.com/agent-sh/tools/blob/main/agent-knowledge/design/lsp.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-lsp`](https://www.npmjs.com/package/@agent-sh/harness-lsp).
 
 ## License
 

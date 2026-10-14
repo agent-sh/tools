@@ -32,7 +32,7 @@ function mkInput(query) {
     categories: ["general"],
     timeoutMs: 9000,
     headers: {
-      "user-agent": "agent-sh-harness-websearch/0.4.0 (+https://github.com/avifenesh/tools)",
+      "user-agent": "agent-sh-harness-websearch/0.4.0 (+https://github.com/agent-sh/tools)",
     },
     signal: new AbortController().signal,
     checkHost: async () => {},

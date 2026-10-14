@@ -2,7 +2,7 @@
 
 File discovery by pattern. Ignore-aware, mtime-sorted, workspace-fenced.
 
-Rust port of [`@agent-sh/harness-glob`](https://www.npmjs.com/package/@agent-sh/harness-glob). Part of the [`harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context.
+Rust port of [`@agent-sh/harness-glob`](https://www.npmjs.com/package/@agent-sh/harness-glob). Part of the [`harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context.
 
 ## Install
 
@@ -25,7 +25,7 @@ let r = glob(json!({ "pattern": "**/*.rs" }), &session).await;
 
 ## Contract
 
-The full contract lives in [`agent-knowledge/design/glob.md`](https://github.com/avifenesh/tools/blob/main/agent-knowledge/design/glob.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-glob`](https://www.npmjs.com/package/@agent-sh/harness-glob).
+The full contract lives in [`agent-knowledge/design/glob.md`](https://github.com/agent-sh/tools/blob/main/agent-knowledge/design/glob.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-glob`](https://www.npmjs.com/package/@agent-sh/harness-glob).
 
 ## License
 
