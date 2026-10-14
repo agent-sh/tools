@@ -2,7 +2,7 @@
 
 HTTP GET/POST with tool-layer SSRF defense, readability+markdown extraction, redirect-chain reporting, and per-session cache.
 
-Part of the [`@agent-sh/harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context and the full tool surface.
+Part of the [`@agent-sh/harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context and the full tool surface.
 
 ## Install
 
@@ -27,7 +27,7 @@ const r = await webfetch({ url: "https://example.com", extract: "markdown" }, se
 
 ## Contract
 
-The full contract — input shape, output discriminated-union, error codes, permission model, and acceptance tests — lives in [`agent-knowledge/design/webfetch.md`](https://github.com/avifenesh/tools/blob/main/agent-knowledge/design/webfetch.md). Changes to this package must stay in sync with that spec.
+The full contract — input shape, output discriminated-union, error codes, permission model, and acceptance tests — lives in [`agent-knowledge/design/webfetch.md`](https://github.com/agent-sh/tools/blob/main/agent-knowledge/design/webfetch.md). Changes to this package must stay in sync with that spec.
 
 ## License
 

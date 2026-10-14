@@ -24,4 +24,4 @@ export const MAX_SNIPPET_CAP = 600;
  * by Mojeek and the MediaWiki API.
  */
 export const DEFAULT_USER_AGENT =
-  "agent-sh-harness-websearch/0.4.0 (+https://github.com/avifenesh/tools)";
+  "agent-sh-harness-websearch/0.4.0 (+https://github.com/agent-sh/tools)";

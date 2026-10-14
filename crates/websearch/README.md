@@ -2,7 +2,7 @@
 
 Web search for AI agent harnesses — **works with no API key and no setup**. With nothing configured it queries a bundled keyless fallback chain (Exa → Parallel → Mojeek → Marginalia → Wikipedia) and returns the first backend that has results. Exa and Parallel run their own web indexes and are reached through their official keyless MCP endpoints. Optionally upgrade to Brave/Tavily (API key) or a self-hosted SearXNG. Tool-layer SSRF defense, a permission hook, a result-count cap, engine provenance, and a discriminated `ok`/`empty`/`error` result surface.
 
-Rust port of [`@agent-sh/harness-websearch`](https://www.npmjs.com/package/@agent-sh/harness-websearch). Part of the [`harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context. WebSearch finds; [`webfetch`](https://github.com/avifenesh/tools/tree/main/crates/webfetch) reads — they compose.
+Rust port of [`@agent-sh/harness-websearch`](https://www.npmjs.com/package/@agent-sh/harness-websearch). Part of the [`harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context. WebSearch finds; [`webfetch`](https://github.com/agent-sh/tools/tree/main/crates/webfetch) reads — they compose.
 
 ## Install
 
@@ -50,4 +50,4 @@ Exa and Parallel are keyless by default (rate-limited free tiers); `exa_api_key`
 
 ## Contract
 
-The full contract lives in [`agent-knowledge/design/websearch.md`](https://github.com/avifenesh/tools/blob/main/agent-knowledge/design/websearch.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-websearch`](https://www.npmjs.com/package/@agent-sh/harness-websearch).
+The full contract lives in [`agent-knowledge/design/websearch.md`](https://github.com/agent-sh/tools/blob/main/agent-knowledge/design/websearch.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-websearch`](https://www.npmjs.com/package/@agent-sh/harness-websearch).

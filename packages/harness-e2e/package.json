@@ -4,13 +4,13 @@
   "description": "End-to-end harness running real LLM tool-call loops against @agent-sh/harness-* tools (Ollama + qwen3.5)",
   "license": "MIT",
   "author": "Avi Fenesh",
-  "homepage": "https://github.com/avifenesh/tools/tree/main/packages/harness-e2e#readme",
+  "homepage": "https://github.com/agent-sh/tools/tree/main/packages/harness-e2e#readme",
   "bugs": {
-    "url": "https://github.com/avifenesh/tools/issues"
+    "url": "https://github.com/agent-sh/tools/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/avifenesh/tools.git",
+    "url": "git+https://github.com/agent-sh/tools.git",
     "directory": "packages/harness-e2e"
   },
   "type": "module",

@@ -9,12 +9,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/avifenesh/tools.git"
+    "url": "git+https://github.com/agent-sh/tools.git"
   },
   "bugs": {
-    "url": "https://github.com/avifenesh/tools/issues"
+    "url": "https://github.com/agent-sh/tools/issues"
   },
-  "homepage": "https://github.com/avifenesh/tools#readme",
+  "homepage": "https://github.com/agent-sh/tools#readme",
   "author": "Avi Fenesh",
   "license": "MIT",
   "scripts": {

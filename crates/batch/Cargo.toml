@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 description = "Batch tool for AI agent harnesses — run shell commands across multiple directories with sequential/parallel modes, workspace fencing via realpath canonicalization, fail-fast, and per-target timeout"
 repository.workspace = true
-homepage = "https://github.com/avifenesh/tools/tree/main/crates/batch#readme"
+homepage = "https://github.com/agent-sh/tools/tree/main/crates/batch#readme"
 documentation = "https://docs.rs/harness-batch"
 
 [dependencies]

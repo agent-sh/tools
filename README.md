@@ -1,123 +1,157 @@
-# `@agent-sh/harness-*`
+# agent-sh tools
 
-TypeScript-first agent tools, designed for real LLMs.
+**Agent tools built for how LLMs actually call tools:** `read`, `write`/`edit`, `grep`, `glob`, `bash`, `webfetch`, `websearch`, `lsp`, `skill` and `batch`. Each ships as its own npm package and as a Rust crate with matching behavior.
 
-Each tool in this repo (`read`, `write`, `grep`, `glob`, `bash`, `webfetch`, `websearch`, `lsp`, `skill`) ships as its own `@agent-sh/harness-*` npm package, plus an umbrella `@agent-sh/harness-tools` that re-exports them. Matching Rust ports live under `crates/` and maintain TS parity.
+[![npm](https://img.shields.io/npm/v/@agent-sh/harness-tools?label=%40agent-sh%2Fharness-tools)](https://www.npmjs.com/package/@agent-sh/harness-tools)
+[![crates.io](https://img.shields.io/crates/v/harness-tools?label=harness-tools)](https://crates.io/crates/harness-tools)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The tools are meant to be consumed by autonomous agents (Claude, GPT, Qwen, Gemini, ...), not by deterministic callers. That framing shapes every design call — see [`AGENTS.md`](./AGENTS.md) and the per-tool specs under [`agent-knowledge/design/`](./agent-knowledge/design/).
+Most tool libraries are written for deterministic callers. The caller here is a model (Claude, GPT, Qwen, Gemini and others) that guesses parameter names, misremembers paths and retries on whatever the error says. So every result is a typed union instead of a thrown exception, every error carries a recovery hint, and anything that reaches outside the workspace has to pass a permission check.
+
+```text
+read({ path: "src/permisions.ts" })
+
+kind: "error"   code: "NOT_FOUND"
+File not found: src/permisions.ts
+
+Did you mean one of these?
+src/permissions.ts
+```
+
+## Contents
+
+- [Packages](#packages)
+- [Install](#install)
+- [Use it in an agent loop](#use-it-in-an-agent-loop)
+- [Permissions](#permissions)
+- [Design principles](#design-principles)
+- [Rust](#rust)
+- [Repository layout](#repository-layout)
+- [Development](#development)
 
 ## Packages
 
-| Package | What it does |
-|---|---|
-| [`@agent-sh/harness-core`](./packages/core) | Shared types: discriminated results, `ToolError`, `PermissionPolicy`, ledger, operation adapters. Every tool builds on this. |
-| [`@agent-sh/harness-read`](./packages/read) | File read with pagination, binary refusal, directory listing, image/PDF attachment shape, fuzzy-sibling `NOT_FOUND`. |
-| [`@agent-sh/harness-write`](./packages/write) | Atomic file write + targeted `edit` + `multi_edit` pipeline with read-before-edit ledger, `OLD_STRING_NOT_UNIQUE` match locations, fuzzy candidate suggestions. |
-| [`@agent-sh/harness-grep`](./packages/grep) | ripgrep-backed search with discriminated `output_mode`, regex hints on `INVALID_REGEX`, pagination. |
-| [`@agent-sh/harness-glob`](./packages/glob) | File discovery by pattern with ignore-awareness, mtime-sorted results, workspace fence. |
-| [`@agent-sh/harness-bash`](./packages/bash) | Shell with tokio-style cwd-carry, inactivity + wall-clock timeouts, head+tail spill-to-file on overflow, background jobs (`bash_output` / `bash_kill`). |
-| [`@agent-sh/harness-webfetch`](./packages/webfetch) | HTTP `GET`/`POST` with tool-layer SSRF defense, readability+markdown extraction, redirect-chain reporting, size caps, per-session cache. |
-| [`@agent-sh/harness-websearch`](./packages/websearch) | Web search via a session-configured SearXNG backend with SSRF defense, permission hook, and bounded result counts. |
-| [`@agent-sh/harness-lsp`](./packages/lsp) | Language-server operations (hover, definition, references, documentSymbol, workspaceSymbol, implementation) with 1-indexed positions, lazy-spawn, `server_starting` retry hints. |
-| [`@agent-sh/harness-skill`](./packages/skill) | [Agent Skills](https://agentskills.io) `SKILL.md` activation with progressive disclosure, permission-gated activation, trust-gated project skills. |
-| [`@agent-sh/harness-tools`](./packages/tools) | Umbrella re-export for the whole surface. Install this one for everything. |
+| Tool | npm | What it does |
+|---|---|---|
+| read | [`@agent-sh/harness-read`](./packages/read) | Bounded, line-numbered file reads with pagination, directory listing, image/PDF attachments, binary refusal, and a "did you mean" `NOT_FOUND`. |
+| write | [`@agent-sh/harness-write`](./packages/write) | Atomic `write`, targeted `edit` and `multi_edit`. A read-before-edit ledger blocks blind overwrites; `OLD_STRING_NOT_UNIQUE` lists every match. |
+| grep | [`@agent-sh/harness-grep`](./packages/grep) | ripgrep-backed content search with structured output modes, pagination, and regex hints on `INVALID_REGEX`. |
+| glob | [`@agent-sh/harness-glob`](./packages/glob) | Filename search that respects ignore files, sorted by modification time, fenced to the workspace. |
+| bash | [`@agent-sh/harness-bash`](./packages/bash) | Shell with a persistent working directory, inactivity and wall-clock timeouts, head+tail spill-to-file for huge output, and background jobs (`bash_output`, `bash_kill`). |
+| batch | [`@agent-sh/harness-batch`](./packages/batch) | Run one command across many directories (glob, subdirectories or an explicit list). |
+| webfetch | [`@agent-sh/harness-webfetch`](./packages/webfetch) | HTTP GET/POST with SSRF defense, readability + markdown extraction, redirect-chain reporting, size caps and a per-session cache. |
+| websearch | [`@agent-sh/harness-websearch`](./packages/websearch) | Web search with **no API key and no setup** (Exa → Parallel → Mojeek → Marginalia → Wikipedia), optionally Brave, Tavily or self-hosted SearXNG. When one engine comes up short, results from several are merged and ranked. |
+| lsp | [`@agent-sh/harness-lsp`](./packages/lsp) | Language-server hover, definition, references, implementation and symbols, with 1-indexed positions and retry hints while the server starts. |
+| skill | [`@agent-sh/harness-skill`](./packages/skill) | [Agent Skills](https://agentskills.io) `SKILL.md` activation with progressive disclosure and trust-gated project skills. |
+| core | [`@agent-sh/harness-core`](./packages/core) | Shared result types, errors, permission policy, read ledger and adapters. Every tool builds on it. |
+| **all** | [`@agent-sh/harness-tools`](./packages/tools) | Everything above under one import, plus a [pi](https://github.com/earendil-works/pi) coding-agent extension. |
 
 ## Install
 
 ```sh
-npm install @agent-sh/harness-tools
-# or the individual tools:
-npm install @agent-sh/harness-read @agent-sh/harness-grep @agent-sh/harness-glob
+npm install @agent-sh/harness-tools        # everything
+npm install @agent-sh/harness-websearch    # or just the tools you need
 ```
 
-Requires Node ≥ 20.
+Node.js ≥ 20. ESM and CommonJS builds, with TypeScript types.
 
-## Quick start
+## Use it in an agent loop
+
+Every tool exports a ready-made definition (`name`, `description`, JSON Schema `inputSchema`) to hand to the model, and an async function that runs the call. The descriptions are part of the product: they teach the model how to use the tool well, so pass them through unchanged.
 
 ```ts
-import { read } from "@agent-sh/harness-read";
+import {
+  read, grep, websearch,
+  readToolDefinition, grepToolDefinition, websearchToolDefinition,
+  DEFAULT_SENSITIVE_PATTERNS,
+} from "@agent-sh/harness-tools";
 
-const result = await read(
-  { path: "src/index.ts", offset: 1, limit: 50 },
-  {
-    cwd: process.cwd(),
-    permissions: { roots: [process.cwd()], sensitivePatterns: ["**/.env"] },
+const cwd = process.cwd();
+const session = {
+  cwd,
+  permissions: {
+    roots: [cwd],                                   // the workspace fence
+    sensitivePatterns: DEFAULT_SENSITIVE_PATTERNS,  // .env, keys, ~/.aws/credentials, ...
+    hook: async (req) => (req.tool === "websearch" ? "allow" : "deny"),
   },
-);
+};
 
-if (result.kind === "text") {
-  console.log(result.output);
+// 1. Advertise the tools to your model (Anthropic, OpenAI, Bedrock, Ollama, ...).
+const tools = [readToolDefinition, grepToolDefinition, websearchToolDefinition];
+
+// 2. Run whatever tool call the model sends back.
+const handlers = { read, grep, websearch };
+
+async function runToolCall(name: string, input: unknown) {
+  const result = await handlers[name](input, session);
+  // Every result is a union on `kind`; errors are values, never exceptions.
+  return result.kind === "error"
+    ? `${result.error.code}: ${result.error.message}`
+    : result.output;
 }
 ```
 
-Every tool returns a discriminated union by `kind`. See the design docs under [`agent-knowledge/design/`](./agent-knowledge/design/) for each tool's full contract.
+The text you return goes straight back to the model, recovery hints included. If you need structured data, read the typed fields on `result` (for example `meta`, or `results` for websearch) instead of parsing `output`.
 
-## Design philosophy
+## Permissions
 
-LLMs are probabilistic, and the textual surface of a tool (name, description, schema field names, error messages, output shape, pagination hints) is its real contract. We design for that:
+Permissions fail closed.
 
-- **Discriminated unions instead of throwing errors.** The model parses `kind: "not_found"` reliably; it does not parse embedded error markers in a string.
-- **Fail-closed permission hooks.** No hook = refuse. No silent fallback.
-- **Alias pushback tables.** When the model passes `file_path` instead of `path`, we return a targeted hint, not a generic schema error.
-- **Fuzzy recovery hints.** `NOT_FOUND` with candidate siblings. `OLD_STRING_NOT_UNIQUE` with all match locations. The model is expected to correct and retry.
-- **Cross-language parity.** Every tool has a Rust port (`crates/<tool>/`) and a parity baseline proving they behave identically to real LLMs across four Ollama models.
+- **`roots`** fences file tools to the workspace. Paths outside are refused unless the hook allows them.
+- **`sensitivePatterns`** blocks secrets even inside the workspace. `DEFAULT_SENSITIVE_PATTERNS` covers `.env*`, SSH and TLS keys, `~/.aws/credentials`, service-account JSON and similar.
+- **`hook(request) => "allow" | "deny"`** decides anything that leaves the fence or touches the outside world. `request` carries the tool, path, action and metadata.
+- Tools with side effects outside the workspace (`bash`, `webfetch`, `websearch`, `lsp`, `skill`) **refuse to run without a hook**. For scripts and tests you can opt out explicitly with `unsafeAllowBashWithoutHook`, `unsafeAllowFetchWithoutHook`, `unsafeAllowSearchWithoutHook`, `unsafeAllowLspWithoutHook` or `unsafeAllowSkillWithoutHook`. The names are deliberately loud.
+
+## Design principles
+
+The textual surface of a tool (its name, description, field names, error messages, output shape and pagination hints) is its real contract with a model. Each choice below follows from that.
+
+- **Typed results, not exceptions.** A model reliably acts on `kind: "not_found"`. It does not reliably parse an error buried in a stack trace.
+- **Recovery hints in every error.** `NOT_FOUND` lists likely siblings, `OLD_STRING_NOT_UNIQUE` lists every match location, and `INVALID_REGEX` explains the escape. The model is expected to fix the call and retry.
+- **Alias pushback.** Send `file_path` instead of `path` and you get a targeted "did you mean `path`?" instead of a generic schema error.
+- **Bounded output.** Pagination, size caps, and head+tail spill-to-file keep one call from flooding the context window.
+- **Tested against real models.** [`packages/harness-e2e`](./packages/harness-e2e) runs real tool-call loops for every tool on four Ollama models plus Claude Opus on Bedrock, and checks each run against committed baselines.
+- **Spec first.** Each tool's contract lives in [`agent-knowledge/design/`](./agent-knowledge/design/). Code and spec change together.
 
 More in [`AGENTS.md`](./AGENTS.md).
 
+## Rust
+
+Every tool has a Rust port under [`crates/`](./crates), published to crates.io as `harness-<tool>` (`harness-read`, `harness-websearch`, …) with the umbrella crate [`harness-tools`](https://crates.io/crates/harness-tools). The ports keep parity with the TypeScript packages: same inputs, same result kinds, same error codes.
+
+```sh
+cargo add harness-tools
+```
+
 ## Repository layout
 
-```
+```text
 tools/
-├─ packages/                # TypeScript packages (npm-publishable)
-│  ├─ core/                 # @agent-sh/harness-core
-│  ├─ read/                 # @agent-sh/harness-read
-│  ├─ ...                   # one dir per tool
-│  ├─ tools/                # @agent-sh/harness-tools (umbrella)
-│  └─ harness-e2e/          # private — real-LLM test harness
-├─ crates/                  # Rust ports
-│  ├─ harness-core/
-│  ├─ read/
-│  └─ ...                   # one crate per tool
-└─ agent-knowledge/         # design specs + cross-harness research
-   ├─ design/*.md           # per-tool canonical specs
-   └─ *.md                  # research guides (LSP, skill, exec, webfetch, ...)
+├─ packages/              TypeScript packages, one per tool (npm)
+│  ├─ core/               @agent-sh/harness-core
+│  ├─ read/ … skill/      @agent-sh/harness-<tool>
+│  ├─ tools/              @agent-sh/harness-tools (umbrella + pi extension)
+│  └─ harness-e2e/        private: real-LLM tool-call test harness
+├─ crates/                Rust ports, one crate per tool (crates.io)
+└─ agent-knowledge/
+   ├─ design/             canonical per-tool specs
+   └─ *.md                research guides (LSP, skills, exec, webfetch, …)
 ```
 
 ## Development
 
 ```sh
 pnpm install
-
-# TypeScript
-pnpm build
-pnpm test
-pnpm typecheck
-
-# Rust (requires cargo + a stable toolchain)
-cargo build --workspace
-cargo test --workspace
+pnpm build && pnpm test && pnpm typecheck    # TypeScript (pnpm 9, Node ≥ 20)
+cargo test --workspace                       # Rust (stable toolchain)
 ```
 
-### End-to-end harness
+**End-to-end runs against real models.** `packages/harness-e2e` drives tool-call loops on `gemma4:e2b`, `gemma4:26b`, `qwen3:8b` and `qwen3.5:27b-q4_K_M` (Ollama), plus Claude Opus on Bedrock. Baselines in `packages/harness-e2e/baselines/` encode what "good" looks like per tool and model; `pnpm --filter @agent-sh/harness-e2e aggregate:<tool>:check` compares a fresh run against them.
 
-`packages/harness-e2e/` runs real-LLM tool-call loops against every tool for each of four Ollama models (`gemma4:e2b`, `gemma4:26b`, `qwen3:8b`, `qwen3.5:27b-q4_K_M`) plus Bedrock Opus 4.7. Baselines live in `packages/harness-e2e/baselines/` — they encode what "good" looks like for each tool under each model. Running `pnpm --filter @agent-sh/harness-e2e aggregate:<tool>:check` compares a fresh run against its baseline.
+**Releases** use [Changesets](https://github.com/changesets/changesets). Add one with `pnpm changeset` in your PR. On merge to `main`, the release workflow opens a "Version Packages" PR, and merging that publishes to npm. Rust crates publish from version tags. Required repository secrets: `NPM_TOKEN` (publish rights on the `@agent-sh` scope) and `CARGO_REGISTRY_TOKEN`.
 
-### Releases
-
-The repo uses [Changesets](https://github.com/changesets/changesets). To propose a release:
-
-```sh
-pnpm changeset         # describe what changed per package
-```
-
-On merge to `main`, the release workflow opens a "Version Packages" PR that bumps affected packages per semver and updates CHANGELOGs. Merging that PR publishes to npm.
-
-Required repo secret: `NPM_TOKEN` (an automation token for the `@agent-sh` scope).
-
-## Contributing
-
-The design docs at [`agent-knowledge/design/`](./agent-knowledge/design/) are the canonical specs for each tool. Implementation changes must be reflected in the spec, and vice versa. See [`AGENTS.md`](./AGENTS.md) for the contributor agreement.
+**Contributing.** The specs in [`agent-knowledge/design/`](./agent-knowledge/design/) are canonical: a behavior change updates the spec in the same PR, and vice versa. See [`AGENTS.md`](./AGENTS.md).
 
 ## License
 
-MIT © Avi Fenesh
+[MIT](LICENSE) © Avi Fenesh

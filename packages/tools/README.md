@@ -2,7 +2,7 @@
 
 Umbrella package re-exporting every `@agent-sh/harness-*` tool under one import. Install this if you want everything.
 
-Part of the [`@agent-sh/harness-*`](https://github.com/avifenesh/tools) monorepo — see the top-level README for architectural context and the full tool surface.
+Part of the [`@agent-sh/harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context and the full tool surface.
 
 ## Install
 

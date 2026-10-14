@@ -15,13 +15,13 @@
   ],
   "license": "MIT",
   "author": "Avi Fenesh",
-  "homepage": "https://github.com/avifenesh/tools/tree/main/packages/lsp#readme",
+  "homepage": "https://github.com/agent-sh/tools/tree/main/packages/lsp#readme",
   "bugs": {
-    "url": "https://github.com/avifenesh/tools/issues"
+    "url": "https://github.com/agent-sh/tools/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/avifenesh/tools.git",
+    "url": "git+https://github.com/agent-sh/tools.git",
     "directory": "packages/lsp"
   },
   "type": "module",
