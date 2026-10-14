@@ -1,0 +1,68 @@
+{
+  "name": "@agent-sh/harness-web-mcp",
+  "version": "0.0.0",
+  "description": "MCP stdio server exposing @agent-sh/harness-websearch and @agent-sh/harness-webfetch to Claude Code, Codex and any MCP client: keyless web search plus SSRF-safe fetch with markdown extraction",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "websearch",
+    "webfetch",
+    "claude-code",
+    "codex",
+    "ai",
+    "agent"
+  ],
+  "license": "MIT",
+  "author": "Avi Fenesh",
+  "homepage": "https://github.com/agent-sh/tools/tree/main/packages/web-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/agent-sh/tools/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agent-sh/tools.git",
+    "directory": "packages/web-mcp"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "harness-web-mcp": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@agent-sh/harness-webfetch": "workspace:*",
+    "@agent-sh/harness-websearch": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.32.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsup": "^8.3.5",
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.11"
+  }
+}
