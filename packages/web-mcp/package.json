@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/harness-web-mcp",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "MCP stdio server exposing @agent-sh/harness-websearch and @agent-sh/harness-webfetch to Claude Code, Codex and any MCP client: keyless web search plus SSRF-safe fetch with markdown extraction",
   "keywords": [
     "mcp",
