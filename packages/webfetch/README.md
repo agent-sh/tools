@@ -4,6 +4,17 @@ HTTP GET/POST with tool-layer SSRF defense, readability+markdown extraction, red
 
 Part of the [`@agent-sh/harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context and the full tool surface.
 
+## Use from Claude Code or Codex (no code)
+
+[`@agent-sh/harness-web-mcp`](../web-mcp) serves this tool (together with `websearch`) over MCP:
+
+```sh
+claude mcp add -s user harness-web -- npx -y @agent-sh/harness-web-mcp
+codex mcp add harness-web -- npx -y @agent-sh/harness-web-mcp
+```
+
+SSRF defenses stay on; `HARNESS_WEB_FETCH_ALLOW_LOOPBACK=1` opts into localhost. See the [web-mcp README](../web-mcp#readme) for configuration and config-file setups.
+
 ## Install
 
 ```sh
