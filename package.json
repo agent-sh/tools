@@ -5,7 +5,7 @@
   "description": "AI agent harness tools for Bedrock Converse and OpenAI-compatible APIs",
   "packageManager": "pnpm@9.12.0",
   "engines": {
-    "node": ">=20"
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
   "repository": {
     "type": "git",
