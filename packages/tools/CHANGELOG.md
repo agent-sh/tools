@@ -1,5 +1,19 @@
 # @agent-sh/harness-tools
 
+## 0.9.0
+
+### Minor Changes
+
+- a8796da: Use tinyglobby for batch directory matching instead of the unpatched braces dependency. Update the Pi extension type contract and optional peer to the maintained @earendil-works/pi-coding-agent 1.3 line, removing the deprecated Pi package and its vulnerable archive installer from development dependencies.
+- c2aa8d6: Bump jsdom to 30. Node engines now `^22.22.2 || ^24.15.0 || >=26.0.0` for webfetch and the packages that depend on it (harness-tools, harness-web-mcp), matching jsdom 30 and its undici 8 dependency; Node 20 is no longer supported.
+
+### Patch Changes
+
+- Updated dependencies [a8796da]
+- Updated dependencies [c2aa8d6]
+  - @agent-sh/harness-batch@0.1.1
+  - @agent-sh/harness-webfetch@0.9.0
+
 ## 0.8.1
 
 ### Patch Changes

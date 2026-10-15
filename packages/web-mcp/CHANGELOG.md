@@ -1,5 +1,16 @@
 # @agent-sh/harness-web-mcp
 
+## 0.2.0
+
+### Minor Changes
+
+- c2aa8d6: Bump jsdom to 30. Node engines now `^22.22.2 || ^24.15.0 || >=26.0.0` for webfetch and the packages that depend on it (harness-tools, harness-web-mcp), matching jsdom 30 and its undici 8 dependency; Node 20 is no longer supported.
+
+### Patch Changes
+
+- Updated dependencies [c2aa8d6]
+  - @agent-sh/harness-webfetch@0.9.0
+
 ## 0.1.1
 
 ### Patch Changes
