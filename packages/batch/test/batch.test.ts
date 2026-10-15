@@ -89,6 +89,40 @@ describe("batch execution", () => {
     await fs.rm(testDir, { recursive: true, force: true });
   });
 
+  it("preserves brace alternatives when resolving directory targets", async () => {
+    const result = await executeBatch({
+      command: "cat marker.txt",
+      targets: { kind: "glob", pattern: path.join(testDir, "repo-{a,c}") },
+      mode: "sequential",
+    });
+    expect((result.meta.targets as any[]).map((target) => target.path)).toEqual([
+      path.join(testDir, "repo-a"),
+      path.join(testDir, "repo-c"),
+    ]);
+  });
+
+  it("handles deeply nested brace alternatives without failing resolution", async () => {
+    const pattern = path.join(testDir, "{a,".repeat(4096) + "b" + "}".repeat(4096));
+    const result = await executeBatch({
+      command: "true",
+      targets: { kind: "glob", pattern },
+      mode: "sequential",
+    });
+    expect(result.message).toBe("No matching targets found.");
+    expect(result.meta).toEqual({});
+  });
+
+  it("keeps a literal directory as one target instead of expanding its children", async () => {
+    const result = await executeBatch({
+      command: "pwd",
+      targets: { kind: "glob", pattern: testDir },
+      mode: "sequential",
+    });
+    expect((result.meta.targets as any[]).map((target) => target.path)).toEqual([
+      testDir,
+    ]);
+  });
+
   it("runs command in each subdirectory (sequential)", async () => {
     const params: BatchParams = {
       command: "cat marker.txt",

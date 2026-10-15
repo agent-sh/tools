@@ -23,7 +23,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ToolDefinition,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import harnessToolsExtension from "../src/pi-extension.js";
 
 type AnyTool = ToolDefinition<any, any, any>;

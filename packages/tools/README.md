@@ -21,7 +21,7 @@ import { read, grep, glob, bash, webfetch, websearch, lsp, skill } from "@agent-
 import { read } from "@agent-sh/harness-tools/read";
 ```
 
-This package also exposes `./pi-extension` through `pi.extensions` for PI Coding Agent hosts.
+This package also exposes `./pi-extension` through `pi.extensions` for Pi Coding Agent hosts using `@earendil-works/pi-coding-agent` 1.3 line. The deprecated `@mariozechner` package is no longer used for the extension's type contract.
 
 ## Contract
 
