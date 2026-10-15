@@ -1,7 +1,7 @@
 {
   "name": "@agent-sh/harness-batch",
   "version": "0.1.0",
-  "description": "Batch tool for AI agent harnesses — execute commands across multiple directories with glob, subdirs, or explicit targets; sequential or parallel execution; fail-fast; summary or detailed output",
+  "description": "Batch tool for AI agent harnesses \u2014 execute commands across multiple directories with glob, subdirs, or explicit targets; sequential or parallel execution; fail-fast; summary or detailed output",
   "keywords": [
     "ai",
     "agent",
@@ -54,8 +54,8 @@
   },
   "dependencies": {
     "@agent-sh/harness-core": "workspace:*",
-    "fast-glob": "^3.3.2",
-    "valibot": "^1.5.0"
+    "valibot": "^1.5.0",
+    "tinyglobby": "^0.2.17"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

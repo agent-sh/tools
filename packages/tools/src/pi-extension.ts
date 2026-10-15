@@ -3,7 +3,7 @@
  *
  * Registers every harness tool (read, write, edit, multiedit, grep, glob,
  * bash, bash_output, bash_kill, webfetch, websearch, lsp, skill) with the pi
- * coding agent (@mariozechner/pi-coding-agent). pi installs this package as an
+ * coding agent (@earendil-works/pi-coding-agent). pi installs this package as an
  * extension via the package.json `"pi": { "extensions": [...] }` field and
  * calls the default export with an `ExtensionAPI`.
  *
@@ -20,7 +20,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type Static, type TSchema } from "typebox";
 import { formatToolError, InMemoryLedger, type Ledger, type PermissionPolicy, type ToolError } from "@agent-sh/harness-core";
 

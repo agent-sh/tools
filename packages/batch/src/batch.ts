@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import fg from "fast-glob";
+import { glob } from "tinyglobby";
 import {
   type BatchParams,
   type BatchTarget,
@@ -73,10 +73,11 @@ async function resolveSubdirs(t: BatchTargetSubdirs): Promise<string[]> {
 
 async function resolveGlob(t: BatchTargetGlob): Promise<string[]> {
   const expanded = expandTilde(t.pattern);
-  const matches = await fg(expanded, {
+  const matches = await glob(expanded, {
     onlyDirectories: true,
     dot: true,
     absolute: true,
+    expandDirectories: false,
   });
   matches.sort();
   return matches;
