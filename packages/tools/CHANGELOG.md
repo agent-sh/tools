@@ -1,5 +1,22 @@
 # @agent-sh/harness-tools
 
+## 0.9.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @agent-sh/harness-core@0.9.1
+  - @agent-sh/harness-glob@0.9.1
+  - @agent-sh/harness-lsp@0.9.1
+  - @agent-sh/harness-skill@0.9.1
+  - @agent-sh/harness-bash@0.9.1
+  - @agent-sh/harness-batch@0.1.2
+  - @agent-sh/harness-grep@0.9.1
+  - @agent-sh/harness-read@0.9.1
+  - @agent-sh/harness-webfetch@0.9.1
+  - @agent-sh/harness-websearch@0.9.1
+  - @agent-sh/harness-write@0.9.1
+
 ## 0.9.0
 
 ### Minor Changes

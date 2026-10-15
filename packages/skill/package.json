@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/harness-skill",
-  "version": "0.2.0",
+  "version": "0.9.1",
   "description": "Skill tool for AI agent harnesses — authored SKILL.md activation with progressive disclosure, permission-gated activation, trust-gated project skills, and pluggable SkillRegistry",
   "keywords": [
     "ai",

@@ -1,5 +1,12 @@
 # @agent-sh/harness-read
 
+## 0.9.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @agent-sh/harness-core@0.9.1
+
 ## 0.4.0
 
 ### Minor Changes

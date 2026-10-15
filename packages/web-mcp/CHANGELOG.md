@@ -1,5 +1,12 @@
 # @agent-sh/harness-web-mcp
 
+## 0.2.1
+
+### Patch Changes
+
+- @agent-sh/harness-webfetch@0.9.1
+- @agent-sh/harness-websearch@0.9.1
+
 ## 0.2.0
 
 ### Minor Changes

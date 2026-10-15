@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/harness-core",
-  "version": "0.2.0",
+  "version": "0.9.1",
   "description": "Shared types, permissions, ledger, cache, and LLM tool-adapter emitters for @agent-sh/harness-* tools",
   "keywords": [
     "ai",

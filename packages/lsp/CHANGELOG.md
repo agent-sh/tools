@@ -1,5 +1,13 @@
 # @agent-sh/harness-lsp
 
+## 0.9.1
+
+### Patch Changes
+
+- Publish the current Valibot ^1.5.0 dependency manifests. The previous versions of these four packages still install older vulnerable Valibot releases; the source and workspace tests already use 1.5.0. Dependent harness packages receive patch updates so fresh installs use the validated dependency graph.
+- Updated dependencies
+  - @agent-sh/harness-core@0.9.1
+
 ## 0.2.0
 
 ### Minor Changes

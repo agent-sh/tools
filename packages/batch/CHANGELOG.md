@@ -1,5 +1,12 @@
 # @agent-sh/harness-batch
 
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @agent-sh/harness-core@0.9.1
+
 ## 0.1.1
 
 ### Patch Changes
