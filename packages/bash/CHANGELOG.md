@@ -1,5 +1,12 @@
 # @agent-sh/harness-bash
 
+## 0.9.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @agent-sh/harness-core@0.9.1
+
 ## 0.7.1
 
 ### Patch Changes
