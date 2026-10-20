@@ -22,6 +22,7 @@
     "test": "turbo run test",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
+    "test:dependencies": "node --test scripts/dependency-security.test.cjs",
     "clean": "turbo run clean && rm -rf node_modules",
     "changeset": "changeset",
     "version": "changeset version",
@@ -34,6 +35,7 @@
   },
   "pnpm": {
     "overrides": {
+      "read-yaml-file@1.1.0": "2.1.0",
       "ws@>=8.0.0 <8.20.1": ">=8.20.1",
       "esbuild@>=0.27.3 <0.28.1": ">=0.28.1",
       "ws@>=8.0.0 <8.21.0": ">=8.21.0",
