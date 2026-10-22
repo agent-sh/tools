@@ -20,8 +20,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type, type Static, type TSchema } from "typebox";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Type, type TSchema } from "typebox";
 import { formatToolError, InMemoryLedger, type Ledger, type PermissionPolicy, type ToolError } from "@agent-sh/harness-core";
 
 // Tool functions + their definitions (for description text) + session types.
@@ -418,7 +418,9 @@ export default function harnessToolsExtension(pi: ExtensionAPI): void {
     label: string,
     description: string,
     parameters: T,
-    run: (params: Static<T>, cwd: string, signal?: AbortSignal) => Promise<HarnessResult>,
+    // pi may pin a different TypeBox version. Derive arguments from the host
+    // contract instead of comparing two versions' generic Static<T> evaluators.
+    run: (params: Parameters<ToolDefinition<T>["execute"]>[1], cwd: string, signal?: AbortSignal) => Promise<HarnessResult>,
   ): void => {
     pi.registerTool({
       name,
