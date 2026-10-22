@@ -14,7 +14,7 @@ describe("bedrock smoke", () => {
       typeof process.env.AWS_BEARER_TOKEN_BEDROCK === "string";
     if (!shouldRun) {
       console.warn(
-        `[skip bedrock smoke] set E2E_BACKEND=bedrock and ensure AWS_BEARER_TOKEN_BEDROCK is in .env`,
+        `[skip bedrock smoke] set E2E_BACKEND=bedrock and export AWS_BEARER_TOKEN_BEDROCK or store it in the keyring as bedrock-bearer`,
       );
     }
   });

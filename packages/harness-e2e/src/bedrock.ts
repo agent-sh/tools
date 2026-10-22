@@ -93,7 +93,7 @@ function resolveToken(): string {
   const t = process.env.AWS_BEARER_TOKEN_BEDROCK;
   if (!t) {
     throw new Error(
-      "AWS_BEARER_TOKEN_BEDROCK is not set. Put it in .env at the repo root or export it.",
+      "AWS_BEARER_TOKEN_BEDROCK is not set. Export it, or store it in the keyring as bedrock-bearer (cred-get).",
     );
   }
   return t;

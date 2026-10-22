@@ -193,8 +193,9 @@ Two suites, both gated by `it.runIf(() => available)`:
   `resolveModel(defaultOllama)`. Keep this as the canonical entry point
   for any new multi-backend test.
 - `packages/harness-e2e/src/env.ts` — a dependency-free `.env` loader
-  that walks up from cwd. Used to pick up `AWS_BEARER_TOKEN_BEDROCK` and
-  `BEDROCK_MODEL_ID` without adding dotenv.
+  that walks up from cwd for settings such as `BEDROCK_MODEL_ID`, then fills
+  `AWS_BEARER_TOKEN_BEDROCK` from the keyring (`cred-get bedrock-bearer`)
+  when it is unset, without adding dotenv.
 - `packages/harness-e2e/vitest.config.ts` — `testTimeout: 120_000`,
   `hookTimeout: 60_000`. Individual hard tests override to 180_000 or
   300_000 as the third arg to `it.runIf(...)`.
@@ -792,10 +793,10 @@ turbo run test:e2e          # Ollama
 turbo run test:bedrock      # Bedrock (release gate)
 ```
 
-### 10.6 Bedrock credentials via .env
+### 10.6 Bedrock settings via .env, the token via the keyring
 
 The repo ships a zero-dep `loadDotEnv()` in `packages/harness-e2e/src/env.ts`.
-Call it at the **top** of any test file that needs Bedrock creds:
+Call it at the **top** of any test file that needs Bedrock:
 
 ```ts
 loadDotEnv();
@@ -803,14 +804,18 @@ const BACKEND = resolveBackend();
 ```
 
 This walks up from cwd, so monorepo-root `.env` works from any workspace.
-Never commit `.env`. Add entries like:
+Never commit `.env`, and keep keys out of it: `.env` holds settings only.
 
 ```
 E2E_BACKEND=bedrock
-AWS_BEARER_TOKEN_BEDROCK=...
 AWS_REGION=us-east-1
 BEDROCK_MODEL_ID=anthropic.claude-opus-4-7
 ```
+
+The token comes from the environment, or, when unset, from the OS keyring:
+`loadDotEnv()` runs `cred-get bedrock-bearer` and sets
+`AWS_BEARER_TOKEN_BEDROCK` (store it with `cred-set bedrock-bearer`). Where
+`cred-get` is absent, as in CI, export the variable instead.
 
 ### 10.7 pnpm workspace test invocation
 
