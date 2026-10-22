@@ -57,9 +57,9 @@
   "dependencies": {
     "@agent-sh/harness-core": "workspace:*",
     "@mozilla/readability": "^0.6.0",
-    "jsdom": "^30.1.2",
+    "jsdom": "^30.1.3",
     "turndown": "^7.2.0",
-    "undici": "^7.30.0",
+    "undici": "^7.30.1",
     "valibot": "^1.5.0"
   },
   "devDependencies": {

@@ -128,7 +128,7 @@
     "@agent-sh/harness-lsp": "workspace:*",
     "@agent-sh/harness-skill": "workspace:*",
     "@agent-sh/harness-batch": "workspace:*",
-    "typebox": "1.3.27"
+    "typebox": "1.4.2"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
