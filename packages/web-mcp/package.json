@@ -57,7 +57,7 @@
   "dependencies": {
     "@agent-sh/harness-webfetch": "workspace:*",
     "@agent-sh/harness-websearch": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.32.1"
+    "@modelcontextprotocol/sdk": "^1.32.2"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
