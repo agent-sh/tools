@@ -196,26 +196,28 @@ export async function bash(
     if (v === undefined) delete execEnv[k];
   }
 
-  const executor = resolveExecutor(session);
-
-  if (params.background === true) {
-    return runBackground(
+  try {
+    const executor = resolveExecutor(session);
+    if (params.background === true) {
+      return await runBackground(
+        session,
+        executor,
+        params.command,
+        resolvedCwd,
+        execEnv,
+      );
+    }
+    return await runForeground(
       session,
       executor,
       params.command,
       resolvedCwd,
       execEnv,
+      effectiveTimeout,
     );
+  } catch (error) {
+    return err(toolError("IO_ERROR", `Cannot run command: ${(error as Error).message}`));
   }
-
-  return runForeground(
-    session,
-    executor,
-    params.command,
-    resolvedCwd,
-    execEnv,
-    effectiveTimeout,
-  );
 }
 
 async function runBackground(

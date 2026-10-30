@@ -1,3 +1,4 @@
+import { stripTrailingSlashes } from "./html.js";
 import type {
   NamedWebSearchEngine,
   WebSearchEngineInput,
@@ -97,9 +98,9 @@ function mapResults(
     if (title.length === 0) continue;
     let url = "";
     if (typeof e.pageid === "number") {
-      url = `${origin.replace(/\/+$/, "")}/?curid=${e.pageid}`;
+      url = `${stripTrailingSlashes(origin)}/?curid=${e.pageid}`;
     } else {
-      url = `${origin.replace(/\/+$/, "")}/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}`;
+      url = `${stripTrailingSlashes(origin)}/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}`;
     }
     const snippet = typeof e.snippet === "string" ? stripTags(e.snippet) : "";
     // `timestamp` is the article's last-edit time; surface the date portion
@@ -126,7 +127,7 @@ function normalizeLang(language: string): string {
 }
 
 function joinPath(basePath: string, segments: string[]): string {
-  const trimmed = basePath.replace(/\/+$/, "");
+  const trimmed = stripTrailingSlashes(basePath);
   return `${trimmed}/${segments.join("/")}`;
 }
 

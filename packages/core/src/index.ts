@@ -6,3 +6,4 @@ export * from "./mutex.js";
 export * from "./operations.js";
 export * from "./write-operations.js";
 export * from "./adapters.js";
+export * from "./private-files.js";

@@ -176,9 +176,11 @@ tools/
 
 ## Development
 
+Use a supported Node release from `package.json` (Node 22.22.2+, 24.15.0+, or 26+) for development. tsup 9 and Vitest 5 require Node 22 or newer.
+
 ```sh
 pnpm install
-pnpm build && pnpm test && pnpm typecheck    # TypeScript (pnpm 9, Node ≥ 20)
+pnpm build && pnpm test && pnpm typecheck    # TypeScript (pnpm 9)
 cargo test --workspace                       # Rust (stable toolchain)
 ```
 

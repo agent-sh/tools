@@ -22,11 +22,10 @@
 import { createHash } from "node:crypto";
 import {
   existsSync,
-  mkdirSync,
   readFileSync,
-  writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { ensurePrivateDirectory, replacePrivateFile } from "@agent-sh/harness-core";
 
 export type VcrMode = "off" | "record" | "replay";
 
@@ -84,8 +83,11 @@ export function makeVcrFetch(opts: VcrOptions): typeof fetch {
   const mode = opts.mode ?? resolveVcrMode();
   if (mode === "off") return fetch;
 
-  if (mode === "record" && !existsSync(opts.cassetteDir)) {
-    mkdirSync(opts.cassetteDir, { recursive: true });
+  if (!opts.cassetteName || /[\\/\0]/.test(opts.cassetteName)) {
+    throw new Error("VCR: cassetteName must be a filename prefix, without path separators");
+  }
+  if (mode === "record") {
+    ensurePrivateDirectory(opts.cassetteDir);
   }
 
   const vcrFetch: typeof fetch = async (input, init) => {
@@ -127,7 +129,7 @@ export function makeVcrFetch(opts: VcrOptions): typeof fetch {
         body: text,
       },
     };
-    writeFileSync(file, JSON.stringify(entry, null, 2));
+    replacePrivateFile(file, JSON.stringify(entry, null, 2));
     return new Response(text, {
       status: res.status,
       statusText: res.statusText,

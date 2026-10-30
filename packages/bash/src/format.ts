@@ -1,5 +1,5 @@
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendPrivateFile, writePrivateFile } from "@agent-sh/harness-core";
+import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -82,8 +82,7 @@ export class HeadTailBuffer {
   private appendSpill(chunk: Uint8Array): void {
     if (this.spillPath === null) return;
     if (!this.spillInit) {
-      mkdirSync(this.spillDir, { recursive: true });
-      writeFileSync(this.spillPath, "");
+      writePrivateFile(this.spillPath, "");
       this.spillInit = true;
     }
     if (this.fileBytesWritten + chunk.byteLength > this.maxFile) {
@@ -92,7 +91,7 @@ export class HeadTailBuffer {
     }
     // Sync append — output sizes are in KB-to-MB range, no need for
     // async stream plumbing.
-    appendFileSync(this.spillPath, Buffer.from(chunk));
+    appendPrivateFile(this.spillPath, Buffer.from(chunk));
     this.fileBytesWritten += chunk.byteLength;
   }
 
@@ -142,7 +141,7 @@ export class HeadTailBuffer {
 }
 
 export function defaultSpillDir(): string {
-  return path.join(tmpdir(), "agent-sh-bash-spill");
+  return path.join(homedir(), ".cache", "agent-sh-bash-spill");
 }
 
 /**

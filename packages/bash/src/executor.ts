@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, createWriteStream, existsSync, readFileSync, statSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, constants, createWriteStream, existsSync, fstatSync, openSync, readSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { ensurePrivateDirectory, openPrivateFile, replacePrivateFile } from "@agent-sh/harness-core";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { KILL_GRACE_MS } from "./constants.js";
@@ -24,6 +25,7 @@ interface JobMeta {
 /** In-memory job state. */
 interface Job {
   id: string;
+  logDir: string;
   outPath: string;
   errPath: string;
   running: boolean;
@@ -32,18 +34,40 @@ interface Job {
   proc: ReturnType<typeof spawn> | null;
 }
 
+/** Treat persisted paths as data: a job may only reference its own output files. */
+function readJobMeta(logDir: string, jobId: string): JobMeta {
+  ensurePrivateDirectory(logDir);
+  ensurePrivateDirectory(path.join(logDir, "job-meta"));
+  const file = path.join(logDir, "job-meta", `${jobId}.json`);
+  const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || (process.getuid && (stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0))) {
+      throw new Error(`Unsafe job metadata: ${file}`);
+    }
+    const data = JSON.parse(readFileSync(fd, "utf8")) as JobMeta;
+    if (typeof data.outPath !== "string" || typeof data.errPath !== "string" ||
+        path.resolve(data.outPath) !== path.resolve(logDir, `${jobId}.out`) ||
+        path.resolve(data.errPath) !== path.resolve(logDir, `${jobId}.err`) ||
+        typeof data.running !== "boolean" || typeof data.createdAt !== "number") {
+      throw new Error(`Invalid job metadata: ${file}`);
+    }
+    return data;
+  } finally { closeSync(fd); }
+}
+
 /** Write job metadata to disk. Idempotent — safe to call multiple times. */
 function persistJobMeta(logDir: string, jobId: string, meta: JobMeta): void {
   const metaDir = path.join(logDir, "job-meta");
   try {
-    mkdirSync(metaDir, { recursive: true });
+    ensurePrivateDirectory(metaDir);
   } catch {
     // real error (e.g. permission denied); mkdirSync({recursive:true})
     // does NOT throw on EEXIST, so this only fires on genuine failures
     return;
   }
   try {
-    writeFileSync(
+    replacePrivateFile(
       path.join(metaDir, `${jobId}.json`),
       JSON.stringify(meta),
     );
@@ -66,17 +90,18 @@ function loadJobsFromDisk(
       if (!fname.endsWith(".json")) continue;
       const metaPath = path.join(metaDir, fname);
       try {
-        const data = JSON.parse(readFileSync(metaPath, "utf8")) as JobMeta;
+        const jobId = fname.slice(0, -5);
+        const data = readJobMeta(logDir, jobId);
         // Prune expired jobs
         if (now - data.createdAt > TTL_SECS) {
           try { unlinkSync(metaPath); } catch {}
           continue;
         }
-        const jobId = fname.slice(0, -5); // strip .json
         // Only restore jobs not already in memory
         if (!jobs.has(jobId) && !data.running) {
           jobs.set(jobId, {
             id: jobId,
+            logDir,
             outPath: data.outPath,
             errPath: data.errPath,
             running: false,
@@ -112,8 +137,10 @@ export function createLocalBashExecutor(opts?: {
   logDir?: string;
 }): BashExecutor {
   const bashPath = opts?.bashPath ?? "/bin/bash";
-  const logDir = opts?.logDir ?? path.join(tmpdir(), "agent-sh-bash-logs");
-  mkdirSync(logDir, { recursive: true });
+  const logDir = opts?.logDir ?? path.join(homedir(), ".cache", "agent-sh-bash-logs");
+  const legacyLogDir = opts?.logDir === undefined ? path.join(tmpdir(), "agent-sh-bash-logs") : null;
+  ensurePrivateDirectory(logDir);
+  ensurePrivateDirectory(path.join(logDir, "job-meta"));
 
   const jobs = new Map<string, Job>();
 
@@ -126,9 +153,6 @@ export function createLocalBashExecutor(opts?: {
       env: { ...input.env },
       stdio: ["ignore", "pipe", "pipe"],
     });
-
-    child.stdout.on("data", (chunk: Buffer) => input.onStdout(chunk));
-    child.stderr.on("data", (chunk: Buffer) => input.onStderr(chunk));
 
     let killedBySignal = false;
     const onAbort = () => {
@@ -148,9 +172,20 @@ export function createLocalBashExecutor(opts?: {
       input.signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      let outputError: unknown;
+      const forward = (callback: (chunk: Buffer) => void, chunk: Buffer) => {
+        if (outputError !== undefined) return;
+        try { callback(chunk); } catch (error) {
+          outputError = error;
+          onAbort();
+        }
+      };
+      child.stdout.on("data", (chunk: Buffer) => forward(input.onStdout, chunk));
+      child.stderr.on("data", (chunk: Buffer) => forward(input.onStderr, chunk));
       child.on("close", (code, signal) => {
         input.signal.removeEventListener("abort", onAbort);
+        if (outputError !== undefined) { reject(outputError); return; }
         resolve({
           exitCode: code,
           killed: killedBySignal,
@@ -172,8 +207,15 @@ export function createLocalBashExecutor(opts?: {
     const jobId = randomUUID();
     const outPath = path.join(logDir, `${jobId}.out`);
     const errPath = path.join(logDir, `${jobId}.err`);
-    const outStream = createWriteStream(outPath, { flags: "w" });
-    const errStream = createWriteStream(errPath, { flags: "w" });
+    const outFd = openPrivateFile(outPath);
+    let errFd: number;
+    try { errFd = openPrivateFile(errPath); } catch (error) {
+      closeSync(outFd);
+      unlinkSync(outPath);
+      throw error;
+    }
+    const outStream = createWriteStream(outPath, { fd: outFd, autoClose: true });
+    const errStream = createWriteStream(errPath, { fd: errFd, autoClose: true });
 
     const child = spawn(bashPath, ["-c", args.command], {
       cwd: args.cwd,
@@ -187,6 +229,7 @@ export function createLocalBashExecutor(opts?: {
 
     const job: Job = {
       id: jobId,
+      logDir,
       outPath,
       errPath,
       running: true,
@@ -249,11 +292,16 @@ export function createLocalBashExecutor(opts?: {
       if (jobId.includes("/") || jobId.includes("\\") || jobId.includes("\0")) {
         throw new Error(`Invalid job_id: ${jobId}`);
       }
-      const metaPath = path.join(logDir, "job-meta", `${jobId}.json`);
+      let sourceDir = logDir;
+      if (!existsSync(path.join(logDir, "job-meta", `${jobId}.json`)) && legacyLogDir &&
+          existsSync(path.join(legacyLogDir, "job-meta", `${jobId}.json`))) {
+        sourceDir = legacyLogDir;
+      }
       try {
-        const data = JSON.parse(readFileSync(metaPath, "utf8")) as JobMeta;
+        const data = readJobMeta(sourceDir, jobId);
         job = {
           id: jobId,
+          logDir: sourceDir,
           outPath: data.outPath,
           errPath: data.errPath,
           running: data.running,
@@ -262,7 +310,8 @@ export function createLocalBashExecutor(opts?: {
           proc: null,
         };
         jobs.set(jobId, job);
-      } catch {
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
         throw new Error(`Unknown job_id: ${jobId}`);
       }
     }
@@ -271,8 +320,7 @@ export function createLocalBashExecutor(opts?: {
     // and check liveness so we detect completion after the old executor died.
     if (job.running && !job.proc) {
       try {
-        const metaPath = path.join(logDir, "job-meta", `${jobId}.json`);
-        const data = JSON.parse(readFileSync(metaPath, "utf8")) as JobMeta;
+        const data = readJobMeta(job.logDir, jobId);
         if (!data.running) {
           // Metadata was updated by the waiter — job is done.
           job.running = false;
@@ -364,10 +412,20 @@ function readSlice(
   since: number,
   limit: number,
 ): { text: string; totalBytes: number } {
-  if (!existsSync(filePath)) return { text: "", totalBytes: 0 };
-  const totalBytes = statSync(filePath).size;
-  if (since >= totalBytes) return { text: "", totalBytes };
-  const end = Math.min(since + limit, totalBytes);
-  const buf = readFileSync(filePath).subarray(since, end);
-  return { text: buf.toString("utf8"), totalBytes };
+  let fd: number;
+  try { fd = openSync(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { text: "", totalBytes: 0 };
+    throw error;
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || (process.getuid && (stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0))) {
+      throw new Error(`Unsafe background output: ${filePath}`);
+    }
+    const totalBytes = stat.size;
+    if (since >= totalBytes) return { text: "", totalBytes };
+    const buf = Buffer.alloc(Math.min(limit, totalBytes - since));
+    const bytesRead = readSync(fd, buf, 0, buf.length, since);
+    return { text: buf.subarray(0, bytesRead).toString("utf8"), totalBytes };
+  } finally { closeSync(fd); }
 }

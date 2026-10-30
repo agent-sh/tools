@@ -183,6 +183,8 @@ Error messages echo the command (truncated to 200 chars) back so the model can s
 
 All caps apply together. Hit whichever first.
 
+Generated spill files, background output and job metadata use mode 0600. Their directories must be real directories owned by the current user and not writable or replaceable by other users. Default logs live at `~/.cache/agent-sh-bash-logs` and foreground spills at `~/.cache/agent-sh-bash-spill`. These per-user paths stay stable across executor restarts. An explicit safe `logDir` can retain an existing deployment's logs. Output pagination reads size and bytes through the same open file descriptor. Storage errors return `IO_ERROR` and stop the command.
+
 | Constant | Default | Override |
 |---|---|---|
 | `DEFAULT_INACTIVITY_TIMEOUT_MS` | 60_000 (60 s) | per-call `timeout_ms` |

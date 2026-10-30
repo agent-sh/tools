@@ -4,7 +4,7 @@ import type {
   WebSearchEngineResult,
   WebSearchResultItem,
 } from "../types.js";
-import { stripTags } from "./html.js";
+import { attributeValue, findElement, stripTags, stripTrailingSlashes } from "./html.js";
 import { httpGet } from "./http.js";
 import { SearchError } from "./searchError.js";
 
@@ -79,20 +79,21 @@ export function createMojeekEngine(
  */
 export function parseMojeek(html: string): WebSearchResultItem[] {
   const out: WebSearchResultItem[] = [];
-  const blockRe = /<!--rs-->([\s\S]*?)<!--re-->/g;
-  let m: RegExpExecArray | null;
-  while ((m = blockRe.exec(html)) !== null) {
-    const block = m[1] ?? "";
-    const titleMatch =
-      /<a[^>]*class="title"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/.exec(
-        block,
-      );
+  let cursor = 0;
+  while (cursor < html.length) {
+    const start = html.indexOf("<!--rs-->", cursor);
+    if (start < 0) break;
+    const end = html.indexOf("<!--re-->", start + 9);
+    if (end < 0) break;
+    const block = html.slice(start + 9, end);
+    cursor = end + 9;
+    const titleMatch = findElement(block, "a", (opening) => attributeValue(opening, "class") === "title" && (attributeValue(opening, "href")?.length ?? 0) > 0);
     if (!titleMatch) continue;
-    const url = decodeHref(titleMatch[1] ?? "");
-    const title = stripTags(titleMatch[2] ?? "");
+    const url = decodeHref(attributeValue(titleMatch.opening, "href") ?? "");
+    const title = stripTags(titleMatch.body);
     if (url.length === 0 || title.length === 0) continue;
-    const snippetMatch = /<p class="s">([\s\S]*?)<\/p>/.exec(block);
-    const snippet = snippetMatch ? stripTags(snippetMatch[1] ?? "") : "";
+    const snippetMatch = findElement(block, "p", (opening) => attributeValue(opening, "class") === "s");
+    const snippet = snippetMatch ? stripTags(snippetMatch.body) : "";
     out.push({ title, url, snippet });
   }
   return out;
@@ -116,6 +117,6 @@ function decodeHref(href: string): string {
 }
 
 function joinPath(basePath: string, segment: string): string {
-  const trimmed = basePath.replace(/\/+$/, "");
+  const trimmed = stripTrailingSlashes(basePath);
   return `${trimmed}/${segment}`;
 }

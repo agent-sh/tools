@@ -1,3 +1,4 @@
+import { stripTrailingSlashes } from "./html.js";
 import type {
   NamedWebSearchEngine,
   WebSearchEngineInput,
@@ -101,6 +102,6 @@ function mapResults(parsed: unknown): WebSearchResultItem[] {
 }
 
 function joinPath(basePath: string, segments: string[]): string {
-  const trimmed = basePath.replace(/\/+$/, "");
+  const trimmed = stripTrailingSlashes(basePath);
   return `${trimmed}/${segments.join("/")}`;
 }

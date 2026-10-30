@@ -207,6 +207,7 @@ The 3-tier means most pages land in Tier 1, large docs/data dumps land in Tier 2
 `~/.agent-sh/webfetch-cache/{session-id}/{uuid}.{ext}` where `{ext}` is derived from content-type (`.html`, `.json`, `.txt`, else `.bin`). Lifecycle:
 
 - Created on spill.
+- Session IDs are single directory names. Spill roots and session directories must be real directories owned by the current user and not writable by other users. Files are created exclusively with mode 0600.
 - Cleaned on session close (best-effort; a harness crash leaves files for the next boot to GC).
 - Not indexed / searchable by the tool itself — the model gets the path and uses Read.
 

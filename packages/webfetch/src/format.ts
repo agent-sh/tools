@@ -1,4 +1,5 @@
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
+import { ensurePrivateDirectory, writePrivateFile } from "@agent-sh/harness-core";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { FetchMetadata } from "./types.js";
@@ -130,11 +131,15 @@ export function spillToFile(args: {
   sessionId: string;
   contentType: string;
 }): string {
+  if (!args.sessionId || args.sessionId === "." || args.sessionId === ".." || /[\\/\0]/.test(args.sessionId)) {
+    throw new Error("sessionId must be a single directory name");
+  }
+  ensurePrivateDirectory(args.dir);
   const dir = path.join(args.dir, args.sessionId);
-  mkdirSync(dir, { recursive: true });
+  ensurePrivateDirectory(dir);
   const ext = extensionFor(args.contentType);
   const filePath = path.join(dir, `${randomUUID()}.${ext}`);
-  writeFileSync(filePath, Buffer.from(args.bytes));
+  writePrivateFile(filePath, Buffer.from(args.bytes));
   return filePath;
 }
 

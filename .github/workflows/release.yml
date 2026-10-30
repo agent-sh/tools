@@ -17,17 +17,17 @@ jobs:
       pull-requests: write
       id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 9.12.0
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "26"
           cache: pnpm
@@ -40,7 +40,7 @@ jobs:
         run: pnpm exec turbo run build --filter='!@agent-sh/harness-e2e'
 
       - name: Create release PR or publish
-        uses: changesets/action@v1
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
         with:
           publish: pnpm changeset publish
           version: pnpm changeset version

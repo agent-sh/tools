@@ -1,3 +1,4 @@
+import { stripTrailingSlashes } from "./html.js";
 import type {
   NamedWebSearchEngine,
   WebSearchEngineInput,
@@ -39,7 +40,7 @@ export function createExaEngine(
       input: WebSearchEngineInput,
     ): Promise<WebSearchEngineResult> {
       const url = new URL(base);
-      url.pathname = `${url.pathname.replace(/\/+$/, "")}/mcp`;
+      url.pathname = `${stripTrailingSlashes(url.pathname)}/mcp`;
       const res = await mcpToolCall(url, input, {
         engine: ENGINE_NAME,
         tool: TOOL,

@@ -6,7 +6,7 @@ import {
   createMessageConnection,
   StreamMessageReader,
   StreamMessageWriter,
-} from "vscode-jsonrpc/node.js";
+} from "vscode-jsonrpc/node";
 import type { MessageConnection } from "vscode-jsonrpc";
 import type {
   DocumentSymbol,

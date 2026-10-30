@@ -1,3 +1,4 @@
+import { stripTrailingSlashes } from "./html.js";
 import { request } from "undici";
 import type {
   NamedWebSearchEngine,
@@ -147,6 +148,6 @@ function mapResults(parsed: unknown): WebSearchResultItem[] {
 }
 
 function joinPath(basePath: string, segment: string): string {
-  const trimmed = basePath.replace(/\/+$/, "");
+  const trimmed = stripTrailingSlashes(basePath);
   return `${trimmed}/${segment}`;
 }

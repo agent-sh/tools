@@ -63,6 +63,71 @@ export function decodeEntities(input: string): string {
 
 /** Strip HTML tags, decode entities, and collapse whitespace. */
 export function stripTags(html: string): string {
-  const noTags = html.replace(/<[^>]*>/g, " ");
-  return decodeEntities(noTags).replace(/\s+/g, " ").trim();
+  const parts: string[] = [];
+  let cursor = 0;
+  while (cursor < html.length) {
+    const start = html.indexOf("<", cursor);
+    if (start < 0) break;
+    const end = html.indexOf(">", start + 1);
+    if (end < 0) break;
+    parts.push(html.slice(cursor, start), " ");
+    cursor = end + 1;
+  }
+  parts.push(html.slice(cursor));
+  return decodeEntities(parts.join("")).replace(/\s+/g, " ").trim();
+}
+
+/** Unlike an unanchored /\/+$/ match, a backward scan never retries a suffix. */
+export function stripTrailingSlashes(input: string): string {
+  let end = input.length;
+  while (end > 0 && input[end - 1] === "/") end--;
+  return input.slice(0, end);
+}
+
+/** Scan each opening tag once, including malformed markup with no closing tag. */
+export function findElement(html: string, tag: string, matches: (opening: string) => boolean): { opening: string; body: string } | null {
+  let cursor = 0;
+  while (cursor < html.length) {
+    const start = html.indexOf(`<${tag}`, cursor);
+    if (start < 0) return null;
+    const end = html.indexOf(">", start + tag.length + 1);
+    if (end < 0) return null;
+    cursor = end + 1;
+    const opening = html.slice(start, cursor);
+    if (!matches(opening)) continue;
+    const close = html.indexOf(`</${tag}>`, cursor);
+    if (close < 0) return null;
+    return { opening, body: html.slice(cursor, close) };
+  }
+  return null;
+}
+
+export function attributeValue(opening: string, name: string): string | null {
+  let cursor = 1;
+  while (cursor < opening.length && !/[\s/>]/.test(opening[cursor]!)) cursor++;
+  while (cursor < opening.length) {
+    while (cursor < opening.length && /[\s/]/.test(opening[cursor]!)) cursor++;
+    if (opening[cursor] === ">") break;
+    const start = cursor;
+    while (cursor < opening.length && !/[\s=/>]/.test(opening[cursor]!)) cursor++;
+    const attribute = opening.slice(start, cursor);
+    while (cursor < opening.length && /\s/.test(opening[cursor]!)) cursor++;
+    if (opening[cursor] !== "=") { if (cursor === start) cursor++; continue; }
+    cursor++;
+    while (cursor < opening.length && /\s/.test(opening[cursor]!)) cursor++;
+    const quote = opening[cursor];
+    let value: string;
+    if (quote === '"' || quote === "'") {
+      const end = opening.indexOf(quote, cursor + 1);
+      if (end < 0) return null;
+      value = opening.slice(cursor + 1, end);
+      cursor = end + 1;
+    } else {
+      const valueStart = cursor;
+      while (cursor < opening.length && !/[\s>]/.test(opening[cursor]!)) cursor++;
+      value = opening.slice(valueStart, cursor);
+    }
+    if (attribute === name) return value;
+  }
+  return null;
 }
