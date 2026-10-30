@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { closeSync, constants, createWriteStream, existsSync, fstatSync, openSync, readSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { ensurePrivateDirectory, openPrivateFile, replacePrivateFile } from "@agent-sh/harness-core";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { KILL_GRACE_MS } from "./constants.js";
+import { defaultBashDirectory } from "./directories.js";
 import type {
   BackgroundReadResult,
   BashExecutor,
@@ -137,10 +138,12 @@ export function createLocalBashExecutor(opts?: {
   logDir?: string;
 }): BashExecutor {
   const bashPath = opts?.bashPath ?? "/bin/bash";
-  const logDir = opts?.logDir ?? path.join(homedir(), ".cache", "agent-sh-bash-logs");
+  const logDir = opts?.logDir ?? defaultBashDirectory("logs");
   const legacyLogDir = opts?.logDir === undefined ? path.join(tmpdir(), "agent-sh-bash-logs") : null;
-  ensurePrivateDirectory(logDir);
-  ensurePrivateDirectory(path.join(logDir, "job-meta"));
+  if (opts?.logDir !== undefined) {
+    ensurePrivateDirectory(logDir);
+    ensurePrivateDirectory(path.join(logDir, "job-meta"));
+  }
 
   const jobs = new Map<string, Job>();
 

@@ -6,6 +6,7 @@ import { createLocalBashExecutor } from "../src/executor.js";
 import { HeadTailBuffer } from "../src/format.js";
 import { bash } from "../src/bash.js";
 import { makeSession } from "./helpers.js";
+import { defaultBashDirectory } from "../src/directories.js";
 
 const roots: string[] = [];
 vi.mock("node:os", { spy: true });
@@ -14,7 +15,7 @@ function root(): string {
   roots.push(dir);
   return dir;
 }
-afterEach(() => { vi.restoreAllMocks(); for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { vi.mocked(tmpdir).mockReset(); vi.mocked(homedir).mockReset(); vi.restoreAllMocks(); for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 it("rejects a planted log-directory symlink and a writable shared directory", () => {
   const dir = root();
@@ -113,4 +114,35 @@ it("restores a job ID saved in the previous default directory", async () => {
     running: false, exitCode: 0, createdAt: Math.floor(Date.now() / 1000) }), { mode: 0o600 });
   const executor = createLocalBashExecutor();
   expect((await executor.readBackground(jobId, {})).stdout).toBe("old output");
+});
+
+it("opens metadata read-only and does not follow a metadata symlink", async () => {
+  const dir = root();
+  const executor = createLocalBashExecutor({ logDir: dir });
+  await expect(executor.readBackground("missing", {})).rejects.toThrow("Unknown job_id");
+  expect(existsSync(path.join(dir, "job-meta", "missing.json"))).toBe(false);
+  if (process.platform !== "win32") {
+    const target = path.join(root(), "metadata.json");
+    writeFileSync(target, "{}", { mode: 0o600 });
+    symlinkSync(target, path.join(dir, "job-meta", "linked.json"));
+    await expect(executor.readBackground("linked", {})).rejects.toThrow();
+    expect(readFileSync(target, "utf8")).toBe("{}");
+  }
+});
+
+it("runs foreground commands without creating storage or requiring a writable home", async () => {
+  const dir = root();
+  vi.mocked(tmpdir).mockReturnValue(dir);
+  vi.mocked(homedir).mockImplementation(() => { throw new Error("home unavailable"); });
+  const logDir = defaultBashDirectory("logs");
+  const executor = createLocalBashExecutor();
+  expect(existsSync(logDir)).toBe(false);
+  const result = await executor.run({ command: "printf inline", cwd: dir, env: {}, signal: AbortSignal.timeout(5000),
+    onStdout: () => {}, onStderr: () => {},
+  });
+  expect(result.exitCode).toBe(0);
+  expect(existsSync(logDir)).toBe(false);
+  const { jobId } = await executor.spawnBackground({ command: "printf background", cwd: dir, env: {} });
+  await expect.poll(async () => (await executor.readBackground(jobId, {})).running, { timeout: 5000 }).toBe(false);
+  expect(existsSync(logDir)).toBe(true);
 });

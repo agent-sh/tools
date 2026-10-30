@@ -1,7 +1,7 @@
 import { appendPrivateFile, writePrivateFile } from "@agent-sh/harness-core";
-import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { defaultBashDirectory } from "./directories.js";
 
 /**
  * Per-stream output buffer with head+tail capping and spill-to-file on
@@ -141,7 +141,7 @@ export class HeadTailBuffer {
 }
 
 export function defaultSpillDir(): string {
-  return path.join(homedir(), ".cache", "agent-sh-bash-spill");
+  return defaultBashDirectory("spill");
 }
 
 /**
