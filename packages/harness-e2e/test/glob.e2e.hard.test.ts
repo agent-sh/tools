@@ -455,7 +455,9 @@ describe(`glob e2e hard [${LABEL}]`, () => {
       // promote vendored files. A terse summary from the model is fine.
       const surface = combinedTextSurface(trace, res.finalContent);
       expect(surface).toMatch(/app\.ts/);
-      expect(res.finalContent).not.toMatch(/node_modules/);
+      expect(trace.toolsByName.glob ?? 0).toBeGreaterThanOrEqual(1);
+      // Explaining that node_modules was excluded is not a returned vendored file.
+      expect(res.finalContent).not.toMatch(/node_modules[\\/]lib[\\/]index\.js/);
       // Tool should also never have returned a node_modules path.
       const toolOutputs = trace.events
         .filter(

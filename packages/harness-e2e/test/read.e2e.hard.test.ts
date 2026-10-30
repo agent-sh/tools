@@ -429,12 +429,8 @@ describe(`e2e hard [${MODEL}]: real LLM calls \`read\` under stress`, () => {
       );
 
       expect(res.finalContent.toLowerCase()).toContain("strelsau");
-
-      if (readCalls === 0 && shellCalls > 0) {
-        console.warn(
-          `[H7 ${MODEL}] WARNING: model bypassed \`read\` and used \`shell\` — tool-description problem.`,
-        );
-      }
+      expect(readCalls).toBeGreaterThanOrEqual(1);
+      expect(shellCalls).toBe(0);
     },
     240_000,
   );
