@@ -11,7 +11,11 @@ import {
   makeReadExecutorRust,
   makeShellExecutor,
   ollamaModelAvailable,
-  runAgent,
+  runE2E,
+  bedrockAvailable,
+  loadDotEnv,
+  resolveBackend,
+  resolveModel,
   warmupOllama,
 } from "../src/index.js";
 
@@ -28,12 +32,15 @@ const pickReadExecutor: typeof makeReadExecutor =
       })
     : makeReadExecutor;
 
+loadDotEnv();
+const BACKEND = resolveBackend();
+
 const BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
 
 // Single model per invocation (override with E2E_MODEL). Keeping one model per
 // process so Ollama only holds one model in VRAM at a time and we don't stack
 // pressure on the GPU across suites.
-const MODEL = process.env.E2E_MODEL ?? "qwen3.5:27b-q4_K_M";
+const MODEL = resolveModel("qwen3.5:27b-q4_K_M");
 
 const SYSTEM_PROMPT_READ_ONLY =
   "You are a coding agent with a single tool: `read`, which reads files and directories. " +
@@ -117,17 +124,19 @@ const TINY_PNG = Buffer.from(
 describe(`e2e hard [${MODEL}]: real LLM calls \`read\` under stress`, () => {
   let available = false;
   beforeAll(async () => {
-    available = await ollamaModelAvailable(MODEL, BASE_URL);
+    available = BACKEND === "bedrock" ? await bedrockAvailable() : await ollamaModelAvailable(MODEL, BASE_URL);
     if (!available) {
       console.warn(
-        `[skip] Ollama model "${MODEL}" not available at ${BASE_URL}`,
+        `[skip] ${BACKEND} model "${MODEL}" not available at ${BASE_URL}`,
       );
       return;
     }
-    const w = await warmupOllama({ model: MODEL, baseUrl: BASE_URL });
-    console.log(
-      `[warmup ${MODEL}] latencyMs=${w.latencyMs} skipped=${w.skipped}${w.reason ? ` reason=${w.reason}` : ""}`,
-    );
+    const w = BACKEND === "ollama" ? await warmupOllama({ model: MODEL, baseUrl: BASE_URL }) : null;
+    if (w) {
+      console.log(
+        `[warmup ${MODEL}] latencyMs=${w.latencyMs} skipped=${w.skipped}${w.reason ? ` reason=${w.reason}` : ""}`,
+      );
+    }
   });
 
   // H1: Single-hop pagination — 3000-line file, default 2000-line read covers
@@ -145,7 +154,8 @@ describe(`e2e hard [${MODEL}]: real LLM calls \`read\` under stress`, () => {
       const exec = pickReadExecutor(session(root));
       const { trace, onTrace } = collectTrace();
 
-      const res = await runAgent({
+      const res = await runE2E({
+        backend: BACKEND,
         baseUrl: BASE_URL,
         model: MODEL,
         tools: [exec],
@@ -181,7 +191,8 @@ describe(`e2e hard [${MODEL}]: real LLM calls \`read\` under stress`, () => {
       const exec = pickReadExecutor(session(root));
       const { trace, onTrace } = collectTrace();
 
-      const res = await runAgent({
+      const res = await runE2E({
+        backend: BACKEND,
         baseUrl: BASE_URL,
         model: MODEL,
         tools: [exec],
@@ -228,7 +239,8 @@ describe(`e2e hard [${MODEL}]: real LLM calls \`read\` under stress`, () => {
       const exec = pickReadExecutor(session(root));
       const { trace, onTrace } = collectTrace();
 
-      const res = await runAgent({
+      const res = await runE2E({
+        backend: BACKEND,
         baseUrl: BASE_URL,
         model: MODEL,
         tools: [exec],
@@ -270,7 +282,8 @@ describe(`e2e hard [${MODEL}]: real LLM calls \`read\` under stress`, () => {
       const exec = pickReadExecutor(session(root));
       const { trace, onTrace } = collectTrace();
 
-      const res = await runAgent({
+      const res = await runE2E({
+        backend: BACKEND,
         baseUrl: BASE_URL,
         model: MODEL,
         tools: [exec],
@@ -307,7 +320,8 @@ describe(`e2e hard [${MODEL}]: real LLM calls \`read\` under stress`, () => {
       const exec = pickReadExecutor(session(root));
       const { trace, onTrace } = collectTrace();
 
-      const res = await runAgent({
+      const res = await runE2E({
+        backend: BACKEND,
         baseUrl: BASE_URL,
         model: MODEL,
         tools: [exec],
@@ -346,7 +360,8 @@ describe(`e2e hard [${MODEL}]: real LLM calls \`read\` under stress`, () => {
       const exec = pickReadExecutor(session(root));
       const { trace, onTrace } = collectTrace();
 
-      const res = await runAgent({
+      const res = await runE2E({
+        backend: BACKEND,
         baseUrl: BASE_URL,
         model: MODEL,
         tools: [exec],
@@ -389,7 +404,8 @@ describe(`e2e hard [${MODEL}]: real LLM calls \`read\` under stress`, () => {
       const shellExec = makeShellExecutor({ cwd: root });
       const { trace, onTrace } = collectTrace();
 
-      const res = await runAgent({
+      const res = await runE2E({
+        backend: BACKEND,
         baseUrl: BASE_URL,
         model: MODEL,
         tools: [readExec, shellExec],

@@ -1,4 +1,4 @@
-import type { AgentRunResult, AgentTraceEvent, ToolExecutor } from "./agent.js";
+import type { AgentRunResult, AgentTraceEvent, ProviderRefusal, ToolExecutor } from "./agent.js";
 import {
   bedrockConverse,
   type BedrockContentBlock,
@@ -82,6 +82,18 @@ export async function runBedrockAgent(
     // Always persist the assistant turn so tool_result messages have a
     // matching tool_use in the preceding message (Converse API requirement).
     messages.push(assistantMsg);
+
+    if (res.stopReason === "content_filtered" || res.stopReason === "guardrail_intervened") {
+      const providerRefusal: ProviderRefusal = { provider: "bedrock", reason: res.stopReason };
+      opts.onTrace?.({ kind: "final", content: textContent, turns: turn, providerRefusal });
+      return {
+        finalContent: textContent,
+        turns: turn,
+        toolCalls: toolCallLog,
+        messages: messages as unknown as AgentRunResult["messages"],
+        providerRefusal,
+      };
+    }
 
     if (toolUses.length === 0) {
       opts.onTrace?.({ kind: "final", content: textContent, turns: turn });

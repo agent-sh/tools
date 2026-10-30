@@ -27,17 +27,23 @@ export interface AgentRunOptions {
   readonly onTrace?: (event: AgentTraceEvent) => void;
 }
 
+export interface ProviderRefusal {
+  readonly provider: "bedrock";
+  readonly reason: "content_filtered" | "guardrail_intervened";
+}
+
 export type AgentTraceEvent =
   | { kind: "assistant"; content: string; toolCalls: readonly OllamaToolCall[] }
   | { kind: "tool_call"; name: string; args: Record<string, unknown> }
   | { kind: "tool_result"; name: string; content: string }
-  | { kind: "final"; content: string; turns: number };
+  | { kind: "final"; content: string; turns: number; providerRefusal?: ProviderRefusal };
 
 export interface AgentRunResult {
   readonly finalContent: string;
   readonly turns: number;
   readonly toolCalls: readonly { name: string; args: Record<string, unknown> }[];
   readonly messages: readonly OllamaMessage[];
+  readonly providerRefusal?: ProviderRefusal;
 }
 
 export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {

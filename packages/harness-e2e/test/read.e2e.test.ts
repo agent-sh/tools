@@ -10,10 +10,17 @@ import type { ReadSessionConfig } from "@agent-sh/harness-read";
 import {
   makeReadExecutor,
   ollamaModelAvailable,
-  runAgent,
+  runE2E,
+  bedrockAvailable,
+  loadDotEnv,
+  resolveBackend,
+  resolveModel,
 } from "../src/index.js";
 
-const MODEL = process.env.E2E_MODEL ?? "qwen3.5:27b-q4_K_M";
+loadDotEnv();
+const BACKEND = resolveBackend();
+
+const MODEL = resolveModel("qwen3.5:27b-q4_K_M");
 const BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
 const SYSTEM_PROMPT =
   "You are a coding agent with a single tool: `read`, which reads files. " +
@@ -43,10 +50,10 @@ function session(root: string): ReadSessionConfig {
 describe("e2e: real LLM calls `read`", () => {
   let available = false;
   beforeAll(async () => {
-    available = await ollamaModelAvailable(MODEL, BASE_URL);
+    available = BACKEND === "bedrock" ? await bedrockAvailable() : await ollamaModelAvailable(MODEL, BASE_URL);
     if (!available) {
       console.warn(
-        `[skip] Ollama model "${MODEL}" not available at ${BASE_URL}`,
+        `[skip] ${BACKEND} model "${MODEL}" not available at ${BASE_URL}`,
       );
     }
   });
@@ -62,7 +69,8 @@ describe("e2e: real LLM calls `read`", () => {
         "The capital of Zembla is Onhava.\n",
       );
       const exec = makeReadExecutor(session(root));
-      const res = await runAgent({
+      const res = await runE2E({
+        backend: BACKEND,
         baseUrl: BASE_URL,
         model: MODEL,
         tools: [exec],
@@ -91,7 +99,8 @@ describe("e2e: real LLM calls `read`", () => {
         ledger,
       });
 
-      const res = await runAgent({
+      const res = await runE2E({
+        backend: BACKEND,
         baseUrl: BASE_URL,
         model: MODEL,
         tools: [exec],
@@ -116,7 +125,8 @@ describe("e2e: real LLM calls `read`", () => {
       writeFile(root, "README.md", "# Project Alpha\n\nThe version is 1.2.3.\n");
       const typo = path.join(root, "readm.md");
       const exec = makeReadExecutor(session(root));
-      const res = await runAgent({
+      const res = await runE2E({
+        backend: BACKEND,
         baseUrl: BASE_URL,
         model: MODEL,
         tools: [exec],
