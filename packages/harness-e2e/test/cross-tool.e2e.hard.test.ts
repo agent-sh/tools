@@ -582,7 +582,7 @@ describe(`cross-tool e2e hard [${LABEL}]`, () => {
           const res = await runE2E(
             runOpts(
               SYSTEM_PROMPT,
-              `In ${root}, find where the function 'handleRequest' is DEFINED (not just imported), then rename it to 'routeRequest' in that file only. Do not touch import statements elsewhere.`,
+              `In ${root}, use grep to find where the function 'handleRequest' is DEFINED (not just imported). Then use read to inspect that whole file before using edit to rename the definition to 'routeRequest' in that file only. A grep snippet is not a full-file read for this check. Do not touch import statements elsewhere.`,
               tools,
               10,
               onTrace,
