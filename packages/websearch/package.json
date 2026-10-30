@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/harness-websearch",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "WebSearch tool for AI agent harnesses: zero-config keyless web search (Exa/Parallel/Mojeek/Marginalia/Wikipedia fallback chain) with optional Brave/Tavily/SearXNG backends, SSRF defense, declarative query controls, result-count cap, and a discriminated result surface",
   "keywords": [
     "ai",

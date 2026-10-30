@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/harness-read",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Read tool for AI agent harnesses — safe, bounded, line-numbered file reading with pluggable I/O, permissions, ledger, and cache",
   "keywords": [
     "ai",

@@ -1,5 +1,12 @@
 # @agent-sh/harness-glob
 
+## 0.9.2
+
+### Patch Changes
+
+- Updated dependencies [73293c4]
+  - @agent-sh/harness-core@0.9.2
+
 ## 0.9.1
 
 ### Patch Changes

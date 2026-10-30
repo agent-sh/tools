@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/harness-lsp",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "LSP tool for AI agent harnesses — language-server-protocol operations (hover, definition, references, symbols) with .lsp.json manifest, lazy-spawn policy, and pluggable LspClient adapter",
   "keywords": [
     "ai",

@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/harness-glob",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Glob tool for AI agent harnesses — ripgrep-backed filename pattern search with structured output, pagination, .gitignore respect, and mtime sort",
   "keywords": [
     "ai",

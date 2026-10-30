@@ -1,5 +1,23 @@
 # @agent-sh/harness-tools
 
+## 0.9.2
+
+### Patch Changes
+
+- 73293c4: Protect generated logs, spill files and metadata with private exclusive creation. Read background output through one file descriptor and parse search markup without repeated regular-expression backtracking. Support JSON-RPC 10's Node export and update dependencies while retaining Pi 1.3 host compatibility.
+- Updated dependencies [73293c4]
+  - @agent-sh/harness-core@0.9.2
+  - @agent-sh/harness-bash@0.9.2
+  - @agent-sh/harness-webfetch@0.9.2
+  - @agent-sh/harness-websearch@0.9.2
+  - @agent-sh/harness-lsp@0.9.2
+  - @agent-sh/harness-batch@0.1.3
+  - @agent-sh/harness-glob@0.9.2
+  - @agent-sh/harness-grep@0.9.2
+  - @agent-sh/harness-read@0.9.2
+  - @agent-sh/harness-skill@0.9.2
+  - @agent-sh/harness-write@0.9.2
+
 ## 0.9.1
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/harness-batch",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Batch tool for AI agent harnesses — execute commands across multiple directories with glob, subdirs, or explicit targets; sequential or parallel execution; fail-fast; summary or detailed output",
   "keywords": [
     "ai",

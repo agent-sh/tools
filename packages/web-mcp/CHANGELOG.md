@@ -1,5 +1,14 @@
 # @agent-sh/harness-web-mcp
 
+## 0.2.2
+
+### Patch Changes
+
+- 73293c4: Protect generated logs, spill files and metadata with private exclusive creation. Read background output through one file descriptor and parse search markup without repeated regular-expression backtracking. Support JSON-RPC 10's Node export and update dependencies while retaining Pi 1.3 host compatibility.
+- Updated dependencies [73293c4]
+  - @agent-sh/harness-webfetch@0.9.2
+  - @agent-sh/harness-websearch@0.9.2
+
 ## 0.2.1
 
 ### Patch Changes

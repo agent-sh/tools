@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/harness-write",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Write / Edit / MultiEdit tools for AI agent harnesses — ledger-anchored, atomic, with structured fuzzy diagnostics",
   "keywords": [
     "ai",
