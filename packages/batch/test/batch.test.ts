@@ -60,6 +60,19 @@ describe("batch schema", () => {
     }
   });
 
+  it("preserves structured validation issues when adding a recovery hint", () => {
+    const result = safeParseBatchParams({ command: "", targets: "{}" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const commandIssue = result.issues.find((issue) => issue.path?.[0]?.key === "command");
+      expect(commandIssue?.type).toBe("min_length");
+      expect(commandIssue?.input).toBe("");
+      const targetsIssue = result.issues.find((issue) => issue.path?.[0]?.key === "targets");
+      expect(targetsIssue?.input).toBe("{}");
+      expect(targetsIssue?.issues?.length).toBeGreaterThan(0);
+    }
+  });
+
   it("rejects empty explicit paths", () => {
     const result = safeParseBatchParams({
       command: "echo hello",

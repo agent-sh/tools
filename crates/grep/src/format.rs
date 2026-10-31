@@ -155,7 +155,7 @@ pub fn format_count(p: CountBlock) -> String {
             next
         )
     } else {
-        format!("({} file(s) with matches.)", p.total)
+        format!("({} file(s) with matches. Count complete. For an existence or file-count question, answer from these counts; matching text is not needed.)", p.total)
     };
     format!("{}\n{}\n\n{}\n</counts>", header, body, hint)
 }

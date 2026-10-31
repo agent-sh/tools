@@ -148,6 +148,7 @@ Output is a discriminated union by `kind`.
 - Paths alphabetically sorted (stable diff ergonomics).
 - `count` is per-line-matches, matching rg `--count` semantics (not per-occurrence).
 - Empty: `(No matches)`.
+- Complete counts include `Count complete` and tell the model to answer existence/file-count questions from the counts, without fetching unrequested matching text. Paginated counts retain only the continuation hint until the final page. State the first-discovery-call requirement directly in the description and mode field, before the pattern fields.
 
 ### 3.4 `kind: "error"`
 

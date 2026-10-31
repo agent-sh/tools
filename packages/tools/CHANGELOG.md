@@ -4,6 +4,8 @@
 
 ### Patch Changes
 
+- Share canonical Batch and Grep schemas with the Pi extension so public field guidance and defaults stay aligned.
+
 - 73293c4: Protect generated logs, spill files and metadata with private exclusive creation. Read background output through one file descriptor and parse search markup without repeated regular-expression backtracking. Support JSON-RPC 10's Node export and update dependencies while retaining Pi 1.3 host compatibility.
 - Updated dependencies [73293c4]
   - @agent-sh/harness-core@0.9.2

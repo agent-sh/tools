@@ -130,6 +130,6 @@ export function formatCount(params: {
   const next = offset + counts.length;
   const hint = more
     ? `(Showing files ${offset + 1}-${next} of ${total}. Next offset: ${next}.)`
-    : `(${total} file(s) with matches.)`;
+    : `(${total} file(s) with matches. Count complete. For an existence or file-count question, answer from these counts; matching text is not needed.)`;
   return `${header}\n${body}\n\n${hint}\n</counts>`;
 }

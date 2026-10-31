@@ -126,7 +126,7 @@ export const GREP_TOOL_NAME = "grep";
 export const GREP_TOOL_DESCRIPTION = `Search file contents with a ripgrep-compatible regex and return structured results.
 
 Choose the output mode before writing the pattern:
-- Discovery starts with files_with_matches (the default) or count. This applies even when locating a definition rather than a call. Put the distinguishing syntax in the pattern, e.g. pattern: "function\\\\s+handleRequest\\\\b", output_mode: "files_with_matches". Inspect matching lines in a follow-up only if needed.
+- For discovery, the FIRST call must use files_with_matches (the default) or count, never content. This includes locating a definition rather than a call. Put the distinguishing syntax in the pattern, e.g. pattern: "function\\\\s+handleRequest\\\\b", output_mode: "files_with_matches". Inspect matching lines in a follow-up only if needed.
 - Existence and file-count questions end with the paths/counts. Match comment syntax in the pattern when asked about comments, e.g. pattern: "//.*TODO", output_mode: "count". Count the returned files. Do not fetch content just to quote examples the user did not request.
 - Use content for a request to show matching lines or surrounding code. Keep context small.
 
@@ -148,6 +148,13 @@ export const grepToolDefinition: ToolDefinition = {
   inputSchema: {
     type: "object",
     properties: {
+      output_mode: {
+        type: "string",
+        enum: ["files_with_matches", "content", "count"],
+        default: "files_with_matches",
+        description:
+          "FIRST discovery call: files_with_matches (default) or count, never content. Existence/file-count questions: use only files_with_matches/count for all calls. Content is for requested matching lines or follow-up inspection after discovery.",
+      },
       pattern: {
         type: "string",
         description: "Ripgrep regex. Escape literal metacharacters.",
@@ -165,13 +172,6 @@ export const grepToolDefinition: ToolDefinition = {
         type: "string",
         description:
           "Ripgrep file-type filter — ONE name only (js, py, rust, go, ...). For multiple extensions, use this tool's 'glob' parameter with a brace list, e.g. glob: \"*.{ts,tsx,js}\".",
-      },
-      output_mode: {
-        type: "string",
-        enum: ["files_with_matches", "content", "count"],
-        default: "files_with_matches",
-        description:
-          "Start discovery with files_with_matches (default) or count, including definition searches. End existence/count tasks with those results. Use content for requested matching lines, or follow-up inspection after discovery.",
       },
       case_insensitive: {
         type: "boolean",

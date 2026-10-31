@@ -25,6 +25,8 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import harnessToolsExtension from "../src/pi-extension.js";
+import { batchToolDefinition } from "@agent-sh/harness-batch";
+import { grepToolDefinition } from "@agent-sh/harness-grep";
 
 type AnyTool = ToolDefinition<any, any, any>;
 
@@ -54,6 +56,11 @@ function resultText(result: { content: ReadonlyArray<{ type: string; text?: stri
 }
 
 describe("pi-extension shared ledger — read composes with edit", () => {
+  it("registers the canonical Batch and Grep model schemas", () => {
+    const tools = buildExtension();
+    expect(tools.get("batch")?.parameters).toMatchObject(batchToolDefinition.inputSchema);
+    expect(tools.get("grep")?.parameters).toMatchObject(grepToolDefinition.inputSchema);
+  });
   it("edit succeeds after read because both share one ledger", async () => {
     const tools = buildExtension();
     const readTool = tools.get("read");

@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Clarify filename/count mode selection before content-mode guidance in the tool description.
+- State the first-discovery-call mode requirement before pattern fields. Complete count results explain when they answer the question without fetching unrequested content.
 
 - Updated dependencies [73293c4]
   - @agent-sh/harness-core@0.9.2

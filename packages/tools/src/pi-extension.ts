@@ -42,6 +42,7 @@ import {
 import {
   grep,
   grepToolDefinition,
+  type GrepParams as GrepParamsInput,
   type GrepSessionConfig,
 } from "@agent-sh/harness-grep";
 import {
@@ -177,31 +178,7 @@ const MultiEditParams = Type.Object({
   dry_run: Type.Optional(Type.Boolean({ description: "Preview the final unified diff without writing." })),
 });
 
-const GrepParams = Type.Object({
-  pattern: Type.String({ description: "ripgrep-compatible (Rust regex) pattern." }),
-  path: Type.Optional(Type.String({ description: "File or directory to search; defaults to cwd." })),
-  glob: Type.Optional(Type.String({ description: "Glob filter, e.g. '*.ts' or '*.{js,tsx}'." })),
-  type: Type.Optional(Type.String({ description: "Single ripgrep file type, e.g. 'js', 'py', 'rust'." })),
-  output_mode: Type.Optional(
-    Type.Union(
-      [Type.Literal("files_with_matches"), Type.Literal("content"), Type.Literal("count")],
-      { description: "Output mode; default files_with_matches." },
-    ),
-  ),
-  case_insensitive: Type.Optional(Type.Boolean()),
-  multiline: Type.Optional(Type.Boolean()),
-  fixed_strings: Type.Optional(
-    Type.Boolean({
-      description:
-        "Treat pattern as an exact literal string, not a regex (ripgrep -F). Use to search strings with metacharacters like ( ) . * { } as plain text without escaping. Default false.",
-    }),
-  ),
-  context_before: Type.Optional(Type.Integer()),
-  context_after: Type.Optional(Type.Integer()),
-  context: Type.Optional(Type.Integer()),
-  head_limit: Type.Optional(Type.Integer({ description: "Cap on returned results; default 250." })),
-  offset: Type.Optional(Type.Integer({ description: "Paging offset." })),
-});
+const GrepParams = Type.Unsafe<GrepParamsInput>(grepToolDefinition.inputSchema);
 
 const GlobParams = Type.Object({
   pattern: Type.String({ description: "Bash-style glob, e.g. '**/*.ts'." }),
@@ -294,34 +271,9 @@ const SkillParams = Type.Object({
   ),
 });
 
-// Batch target schemas (union of subdirs, glob, explicit)
-const BatchTargetSubdirs = Type.Object({
-  kind: Type.Literal("subdirs"),
-  path: Type.String({ description: "Root directory to scan for subdirectories." }),
-  name_filter: Type.Optional(Type.String({ description: "Optional name filter for subdirectory names." })),
-});
-const BatchTargetGlob = Type.Object({
-  kind: Type.Literal("glob"),
-  pattern: Type.String({ description: "Glob pattern for target directories." }),
-});
-const BatchTargetExplicit = Type.Object({
-  kind: Type.Literal("explicit"),
-  paths: Type.Array(Type.String(), { description: "Explicit list of directory paths." }),
-});
-
-const BatchParams = Type.Object({
-  command: Type.String({ description: "Shell command to run in each target. Use $TARGET for the current directory." }),
-  targets: Type.Union([BatchTargetSubdirs, BatchTargetGlob, BatchTargetExplicit], {
-    description: "Target selection: subdirs, glob, or explicit.",
-  }),
-  mode: Type.Optional(Type.Union([Type.Literal("sequential"), Type.Literal("parallel")], {
-    description: "Execution mode. Default: sequential.",
-  })),
-  max_concurrent: Type.Optional(Type.Integer({ minimum: 1, description: "Max concurrent commands for parallel mode (default 4)." })),
-  timeout_secs: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600, description: "Timeout per command in seconds (default 120)." })),
-  fail_fast: Type.Optional(Type.Boolean({ description: "Stop on first failure (default false)." })),
-  summary_only: Type.Optional(Type.Boolean({ description: "Return only summary counts (default false)." })),
-});
+// Keep canonical JSON schemas shared with every model client.
+// Type.Unsafe supplies static types; Valibot still validates execution.
+const BatchParams = Type.Unsafe<BatchParams>(batchToolDefinition.inputSchema);
 
 // ---------------------------------------------------------------------------
 // Session builders (env-resolved, pi-mediated permissions)

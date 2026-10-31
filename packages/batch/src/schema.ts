@@ -123,10 +123,9 @@ export function safeParseBatchParams(input: unknown):
   if (input !== null && typeof input === "object" && "targets" in input) {
     const targetResult = v.safeParse(BatchTargetSchema, input.targets);
     if (!targetResult.success) {
-      return { ok: false, issues: makeAliasIssues([
-        ...result.issues.map((issue) => issue.message),
+      return { ok: false, issues: [...result.issues, ...makeAliasIssues([
         'targets must be an object, not a JSON string. Use targets: { kind: "explicit", paths: ["/workspace/a", "/workspace/b"] }, { kind: "subdirs", path: "/workspace" }, or { kind: "glob", pattern: "/workspace/*" }. The discriminator is kind; mode is only for sequential/parallel execution.',
-      ]) };
+      ])] };
     }
   }
   return { ok: false, issues: result.issues };
