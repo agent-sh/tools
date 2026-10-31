@@ -2,6 +2,8 @@
 
 Execute one shell command in several selected directories. The production tool and real-model adapter expose the same JSON schema.
 
+The description must establish routing before parameter details: prefer Batch over a shell loop or a combined shell command for the same operation in multiple directories. Mention inspecting the same marker/config/version file across workspaces alongside Git/build tasks, so ordinary file-inspection requests do not look outside the tool's scope. Every target retains its own working directory and status/output.
+
 `command` is required. `targets` is a required object with exactly one of these forms:
 
 - `{ kind: "subdirs", path: "/workspace", name_filter?: "repo-*" }`

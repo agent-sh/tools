@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Expose the target selector's object fields directly in the schema and give concrete recovery hints for invalid selectors. Keep all three strict target forms unchanged.
+- Expose the target selector's object fields directly in the schema and give concrete recovery hints for invalid selectors. Explain routing for ordinary file inspection across workspaces. Keep all three strict target forms unchanged.
 
 - Updated dependencies [73293c4]
   - @agent-sh/harness-core@0.9.2

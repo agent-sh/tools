@@ -135,7 +135,7 @@ export function safeParseBatchParams(input: unknown):
 
 export const BATCH_TOOL_NAME = "batch";
 
-export const BATCH_TOOL_DESCRIPTION = `Execute a shell command across multiple directories. Use for batch git operations, bulk file operations, workspace builds, etc.
+export const BATCH_TOOL_DESCRIPTION = `Run the same command in multiple directories. Prefer this tool over a shell loop or one shell command combining several directories. Each target gets its own working directory and separately reported status/output. This includes inspecting the same marker, config or version file across workspaces, as well as Git operations and builds.
 
 Supports three target modes:
 - targets: { kind: "subdirs", path: "/workspace" } runs in each immediate subdirectory
