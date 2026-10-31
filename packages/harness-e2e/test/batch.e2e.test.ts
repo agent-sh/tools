@@ -48,6 +48,24 @@ function expectTwoSuccessfulTargets(replies: string[], directories: string[]) {
   expect(targets?.every((target) => target.status === "success")).toBe(true);
 }
 
+function expectFailFastCall(args: Record<string, unknown>, directories: string[]) {
+  expect(args).toMatchObject({
+    command: "false",
+    mode: "sequential",
+    fail_fast: true,
+    targets: { kind: "explicit", paths: directories },
+  });
+}
+
+it("rejects a one-target trace as fail-fast qualification", () => {
+  const directories = ["/fixture/alpha", "/fixture/bravo"];
+  const args = { command: "false", mode: "sequential", fail_fast: true,
+    targets: { kind: "explicit", paths: directories } };
+  expect(() => expectFailFastCall(args, directories)).not.toThrow();
+  expect(() => expectFailFastCall({ ...args, targets: { kind: "explicit", paths: [directories[0]] } }, directories)).toThrow();
+  expect(() => expectFailFastCall({ ...args, fail_fast: false }, directories)).toThrow();
+});
+
 describe(`batch real-model [${modelLabel(model)}]`, () => {
   let available = false;
   beforeAll(async () => { available = backend === "bedrock" ? await bedrockAvailable() : await ollamaModelAvailable(model, baseUrl); });
@@ -94,13 +112,15 @@ describe(`batch real-model [${modelLabel(model)}]`, () => {
   it("stops a sequential batch on the first intentional failure", async (ctx) => {
     if (!available) ctx.skip();
     const { root, directories } = fixture();
-    const { replies } = await ask(root, `Use batch to run the command false sequentially in ${directories.join(" then ")}. Set fail_fast true. This intentional local failure tests stopping after the first target. Report the failure count.`);
-    const response = responses(replies).find((reply) => reply.meta?.summary || reply.meta?.targets);
+    const { replies, result } = await ask(root, `Use batch to run the command false sequentially in ${directories.join(" then ")}. Set fail_fast true. This intentional local failure tests stopping after the first target. Report the failure count.`);
+    expect(result.toolCalls).toHaveLength(1);
+    expectFailFastCall(result.toolCalls[0]!.args, directories);
+    const response = responses(replies)[0];
     if (response?.meta?.summary) {
       expect(response.meta.summary).toMatchObject({ total: 1, failed: 1 });
     } else {
       expect(response?.meta?.targets).toHaveLength(1);
-      expect(response?.meta?.targets?.[0]?.status).toBe("failed");
+      expect(response?.meta?.targets?.[0]).toMatchObject({ path: directories[0], status: "failed" });
     }
   });
 
