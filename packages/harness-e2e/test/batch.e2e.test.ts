@@ -34,8 +34,27 @@ async function ask(root: string, userPrompt: string, shellDecoy = false) {
   expect(result.toolCalls.length).toBeGreaterThanOrEqual(1);
   expect(result.toolCalls.every((call) => call.name === "batch")).toBe(true);
   expectTaskCompletion(result);
-  return { result, replies };
+  return { result, replies, events };
 }
+
+function expectRecoveryTurn(events: AgentTraceEvent[]) {
+  const calls = events.map((event, index) => event.kind === "tool_call" ? index : -1).filter((index) => index >= 0);
+  const empty = events.findIndex((event) => event.kind === "tool_result" && event.content.includes("No matching targets found"));
+  const nextAssistant = events.findIndex((event, index) => index > empty && event.kind === "assistant" && event.toolCalls.length > 0);
+  expect(empty).toBeGreaterThan(calls[0]!);
+  expect(nextAssistant).toBeGreaterThan(empty);
+  expect(calls[1]).toBeGreaterThan(nextAssistant);
+}
+
+it("requires a model recovery turn after the empty target result", () => {
+  const call = { function: { name: "batch", arguments: {} } };
+  const first: AgentTraceEvent = { kind: "tool_call", name: "batch", args: {} };
+  const empty: AgentTraceEvent = { kind: "tool_result", name: "batch", content: "No matching targets found" };
+  const second: AgentTraceEvent = { kind: "tool_call", name: "batch", args: {} };
+  const assistant: AgentTraceEvent = { kind: "assistant", content: "", toolCalls: [call] };
+  expect(() => expectRecoveryTurn([assistant, first, empty, assistant, second])).not.toThrow();
+  expect(() => expectRecoveryTurn([{ ...assistant, toolCalls: [call, call] }, first, empty, second])).toThrow();
+});
 
 function expectTaskCompletion(result: Pick<AgentRunResult, "providerRefusal" | "finalContent">) {
   expect(result.providerRefusal).toBeUndefined();
@@ -109,7 +128,8 @@ describe(`batch real-model [${modelLabel(model)}]`, () => {
   it("recovers from an empty target pattern", async (ctx) => {
     if (!available) ctx.skip();
     const { root, directories } = fixture();
-    const { result, replies } = await ask(root, `Use batch with cat marker.txt. First check the glob ${root}/stale-* to verify the no-target response. After that empty result, retry the immediate child directories of ${root}. Report the marker values.`);
+    const { result, replies, events } = await ask(root, `Use batch with cat marker.txt. First check the glob ${root}/stale-* to verify the no-target response. After that empty result, retry the immediate child directories of ${root}. Report the marker values.`);
+    expectRecoveryTurn(events);
     expect(result.toolCalls).toHaveLength(2);
     expect(result.toolCalls[0]?.args.targets).toEqual({ kind: "glob", pattern: `${root}/stale-*` });
     expect(replies[0]).toContain("No matching targets found");
