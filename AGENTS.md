@@ -80,8 +80,7 @@ be for deterministic code, not less. Cover every edge case, every
   `think: false` or `/no_think` to a run that exercises a tool: thinking
   off lowers tool-call quality, which is what the suites measure, so
   latency is not a reason to turn it off. `think` defaults to `true` in
-  `packages/harness-e2e`; only the one-word warmup in
-  `packages/harness-e2e/src/warmup.ts` turns it off.
+  `packages/harness-e2e`, including the one-word warmup.
 - **E2E harness is `packages/harness-e2e`.** It is the canonical place to
   prove a tool works. New tools must land with a corresponding e2e suite
   that covers the categories above.

@@ -125,6 +125,11 @@ export const GREP_TOOL_NAME = "grep";
 
 export const GREP_TOOL_DESCRIPTION = `Search file contents with a ripgrep-compatible regex and return structured results.
 
+Choose the output mode before writing the pattern:
+- Discovery starts with files_with_matches (the default) or count. This applies even when locating a definition rather than a call. Put the distinguishing syntax in the pattern, e.g. pattern: "function\\\\s+handleRequest\\\\b", output_mode: "files_with_matches". Inspect matching lines in a follow-up only if needed.
+- Existence and file-count questions end with the paths/counts. Match comment syntax in the pattern when asked about comments, e.g. pattern: "//.*TODO", output_mode: "count". Count the returned files. Do not fetch content just to quote examples the user did not request.
+- Use content for a request to show matching lines or surrounding code. Keep context small.
+
 Usage:
 - pattern is required. Regex syntax is ripgrep's (Rust regex). Escape literal metacharacters: use 'interface\\\\{\\\\}' to match 'interface{}'. '.' does not match newlines unless multiline: true. To search an EXACT string with regex metacharacters like ( ) . * { } treated as plain text, set fixed_strings: true instead of escaping (e.g. fixed_strings: true with pattern foo(bar) or a.b.c).
 - path defaults to the session cwd. Absolute paths preferred; relative paths resolve against cwd.
@@ -164,8 +169,9 @@ export const grepToolDefinition: ToolDefinition = {
       output_mode: {
         type: "string",
         enum: ["files_with_matches", "content", "count"],
+        default: "files_with_matches",
         description:
-          "files_with_matches (default, cheap, paths only), content (matching lines grouped by file), count (per-file counts).",
+          "Start discovery with files_with_matches (default) or count, including definition searches. End existence/count tasks with those results. Use content for requested matching lines, or follow-up inspection after discovery.",
       },
       case_insensitive: {
         type: "boolean",

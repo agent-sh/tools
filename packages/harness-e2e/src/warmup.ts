@@ -56,8 +56,7 @@ export async function warmupOllama(
           { role: "system", content: "Reply with a single word." },
           { role: "user", content: "Say: ok" },
         ],
-        // A small warmup prompt — we don't need thinking on for this.
-        think: false,
+        think: true,
         temperature: 0.6,
       }),
       new Promise<never>((_, reject) =>

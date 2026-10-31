@@ -160,6 +160,9 @@ importers:
       '@agent-sh/harness-bash':
         specifier: workspace:*
         version: link:../bash
+      '@agent-sh/harness-batch':
+        specifier: workspace:*
+        version: link:../batch
       '@agent-sh/harness-core':
         specifier: workspace:*
         version: link:../core

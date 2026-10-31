@@ -72,6 +72,8 @@ Non-goals: filename/path search (that is the Glob tool), semantic/AST search, ve
 
 ### Pattern guidance (lives in the tool description, not the schema)
 
+Put mode selection before pattern syntax: discovery starts with `files_with_matches` (also the JSON schema default) or `count`, including definition-location questions. Use the distinguishing syntax in the pattern, e.g. `function\\s+handleRequest\\b`. Inspect content in a follow-up when needed. Existence/file-count questions end with the paths/counts; match comment syntax in the pattern if that is the requested scope, e.g. `//.*TODO`. Do not fetch content merely to quote unrequested examples. Direct line/context requests use `content`. Include these concrete recipes in the public description so the distinction survives real-model tool selection.
+
 Tool description must call out:
 
 > Regex syntax is ripgrep's (Rust `regex` crate). To match literal `{` `}` `(` `)` `[` `]` `.` `*` `+` `?` `|` `^` `$` `\\`, escape them (`interface\\{\\}` to find `interface{}`) — or set `fixed_strings: true` to treat the whole pattern as a literal string with no escaping. By default `.` does not match newlines — set `multiline: true` if your pattern needs to cross lines.

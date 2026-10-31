@@ -151,6 +151,7 @@
     "@agent-sh/harness-grep": "workspace:*",
     "@agent-sh/harness-glob": "workspace:*",
     "@agent-sh/harness-bash": "workspace:*",
+    "@agent-sh/harness-batch": "workspace:*",
     "@agent-sh/harness-webfetch": "workspace:*",
     "@agent-sh/harness-websearch": "workspace:*",
     "@agent-sh/harness-lsp": "workspace:*",

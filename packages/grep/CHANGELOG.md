@@ -4,6 +4,8 @@
 
 ### Patch Changes
 
+- Clarify filename/count mode selection before content-mode guidance in the tool description.
+
 - Updated dependencies [73293c4]
   - @agent-sh/harness-core@0.9.2
 

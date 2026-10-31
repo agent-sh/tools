@@ -10,6 +10,7 @@ export * from "./grepExecutorRust.js";
 export * from "./globExecutor.js";
 export * from "./globExecutorRust.js";
 export * from "./bashExecutor.js";
+export * from "./batchExecutor.js";
 export * from "./bashExecutorRust.js";
 export * from "./webfetchExecutor.js";
 export * from "./webfetchExecutorRust.js";
