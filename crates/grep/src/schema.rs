@@ -179,6 +179,10 @@ pub const GREP_TOOL_NAME: &str = "grep";
 
 pub const GREP_TOOL_DESCRIPTION: &str =
     "Search file contents with a ripgrep-compatible regex and return structured results.\n\n\
+    Choose the output mode before writing the pattern:\n\
+    - Discovery starts with files_with_matches (the default) or count. This applies even when locating a definition rather than a call. Put the distinguishing syntax in the pattern, e.g. pattern: \"function\\\\s+handleRequest\\\\b\", output_mode: \"files_with_matches\". Inspect matching lines in a follow-up only if needed.\n\
+    - Existence and file-count questions end with the paths/counts. Match comment syntax in the pattern when asked about comments, e.g. pattern: \"//.*TODO\", output_mode: \"count\". Count the returned files. Do not fetch content just to quote examples the user did not request.\n\
+    - Use content for a request to show matching lines or surrounding code. Keep context small.\n\n\
     Usage:\n\
     - pattern is required. Regex syntax is ripgrep's (Rust regex). Escape literal metacharacters: use 'interface\\\\{\\\\}' to match 'interface{}'. '.' does not match newlines unless multiline: true.\n\
     - path defaults to the session cwd. Absolute paths preferred; relative paths resolve against cwd.\n\
