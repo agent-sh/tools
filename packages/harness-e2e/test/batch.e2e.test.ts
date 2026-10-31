@@ -62,6 +62,41 @@ function expectTaskCompletion(result: Pick<AgentRunResult, "providerRefusal" | "
   expect(result.finalContent).not.toBe("(max turns reached)");
 }
 
+function expectReportedBatchCounts(answer: string, expected: { success?: number; failed?: number }) {
+  const text = answer.replace(/[*_`]/g, "");
+  const quantity = "(?:zero|none|no|one|two|both|\\d+)";
+  const label = "(?:success(?:es|ful(?:ly)?)?|succeeded|failed|failures?)";
+  const noun = "(?:targets?|commands?|directories|operations?)";
+  const reported = { success: new Set<number>(), failed: new Set<number>() };
+  const words: Record<string, number> = { zero: 0, none: 0, no: 0, one: 1, two: 2, both: 2 };
+  const record = (count: string, kind: string) => {
+    reported[kind.toLowerCase().startsWith("fail") ? "failed" : "success"]
+      .add(words[count.toLowerCase()] ?? Number(count));
+  };
+  const before = new RegExp(`\\b(${quantity})\\s+(?:${noun}\\s+)?(?:(?:were|completed)\\s+)?(${label})\\b`, "gi");
+  const after = new RegExp(`\\b(${label})(?:\\s+(?:${noun}|count))?(?:\\s*[:=]\\s*|\\s+(?:(?:is|was|were)\\s+)?)(${quantity})\\b`, "gi");
+  for (const match of text.matchAll(before)) record(match[1]!, match[2]!);
+  for (const match of text.matchAll(after)) record(match[2]!, match[1]!);
+  for (const kind of ["success", "failed"] as const) {
+    if (expected[kind] !== undefined) expect([...reported[kind]]).toEqual([expected[kind]]);
+  }
+}
+
+it("requires the final answer to report the executed batch counts", () => {
+  for (const answer of ["One target failed; the second was skipped.", "Failure count: 1."]) {
+    expect(() => expectReportedBatchCounts(answer, { failed: 1 })).not.toThrow();
+  }
+  for (const answer of ["All commands succeeded.", "Done.", "0 failures."]) {
+    expect(() => expectReportedBatchCounts(answer, { failed: 1 })).toThrow();
+  }
+  for (const answer of ["2 successes; 0 failures.", "Both commands completed successfully with no failures.", "Successful targets: **2**. Failed targets: **0**."]) {
+    expect(() => expectReportedBatchCounts(answer, { success: 2, failed: 0 })).not.toThrow();
+  }
+  for (const answer of ["Two failures, zero successes.", "2 successes, 0 failures; actually 2 failures.", "2 targets processed."]) {
+    expect(() => expectReportedBatchCounts(answer, { success: 2, failed: 0 })).toThrow();
+  }
+});
+
 it("rejects a final provider refusal despite earlier successful tool output", () => {
   const result = { toolCalls: [{ name: "batch", args: {} }], finalContent: "BIRCH CEDAR",
     providerRefusal: { provider: "bedrock", reason: "content_filtered" } as const };
@@ -166,6 +201,7 @@ describe(`batch real-model [${modelLabel(model)}]`, () => {
       expect(response?.meta?.targets).toHaveLength(1);
       expect(response?.meta?.targets?.[0]).toMatchObject({ path: directories[0], status: "failed" });
     }
+    expectReportedBatchCounts(result.finalContent, { failed: 1 });
   });
 
   it("uses batch despite a shell distractor", async (ctx) => {
@@ -185,7 +221,7 @@ describe(`batch real-model [${modelLabel(model)}]`, () => {
     const response = responses(replies).find((reply) => reply.meta?.summary);
     expect(response?.meta?.summary).toMatchObject({ total: 2, success: 2, failed: 0 });
     expect(response?.meta?.targets).toBeUndefined();
-    expect(result.finalContent).toMatch(/2|two/i);
+    expectReportedBatchCounts(result.finalContent, { success: 2, failed: 0 });
   });
 
   it("handles a directory containing spaces with optional controls omitted", async (ctx) => {
