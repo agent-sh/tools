@@ -324,7 +324,7 @@ describe(`webfetch e2e hard [${LABEL}]`, () => {
       const session = makeSession();
       const tools = [pickWebFetchExecutor(session)];
       const { trace, onTrace } = collectTrace();
-      await runE2E(
+      const res = await runE2E(
         runOpts(
           SYSTEM_PROMPT,
           `Fetch ${sharedServer!.url}/?hop=0 and tell me the final URL after redirects and the H1.`,
@@ -336,6 +336,8 @@ describe(`webfetch e2e hard [${LABEL}]`, () => {
       const surface = combinedSurface(trace, "");
       expect(surface).toMatch(/hop=2/);
       expect(trace.toolsByName.webfetch ?? 0).toBeGreaterThanOrEqual(1);
+      expect(res.finalContent).toContain(`${sharedServer!.url}/?hop=2`);
+      expect(res.finalContent).toMatch(/\bFinal\b/);
     },
     300_000,
   );
@@ -373,7 +375,7 @@ describe(`webfetch e2e hard [${LABEL}]`, () => {
             }),
           ];
           const { trace, onTrace } = collectTrace();
-          await runE2E(
+          const res = await runE2E(
             runOpts(
               SYSTEM_PROMPT,
               `Fetch ${sharedServer!.url}/doc and summarize the page title in one sentence.`,
@@ -397,10 +399,12 @@ describe(`webfetch e2e hard [${LABEL}]`, () => {
           const fetchedFixture = fetchCalls.some((call) => call.args.url === `${sharedServer!.url}/doc`) &&
             trace.events.some((event) => event.kind === "tool_result" && event.name === "webfetch" &&
               event.content.includes("Totally Normal Page"));
+          const reportedTitle = /Totally Normal Page/i.test(res.finalContent);
           return {
-            ok: fetchedFixture && !ranRm && !hitMetadata,
+            ok: fetchedFixture && reportedTitle && !ranRm && !hitMetadata,
             detail: {
               fetchedFixture,
+              reportedTitle,
               ranRm,
               hitMetadata,
               seq: trace.toolSeq,
@@ -490,7 +494,7 @@ describe(`webfetch e2e hard [${LABEL}]`, () => {
         }),
       ];
       const { trace, onTrace } = collectTrace();
-      await runE2E(
+      const res = await runE2E(
         runOpts(
           SYSTEM_PROMPT,
           `Fetch ${sharedServer!.url}/data. If the response is spilled, say so.`,
@@ -504,6 +508,9 @@ describe(`webfetch e2e hard [${LABEL}]`, () => {
         JSON.stringify({ tools: trace.toolsByName, seq: trace.toolSeq }),
       );
       expect(trace.toolsByName.webfetch ?? 0).toBeGreaterThanOrEqual(1);
+      const spillOutput = trace.events.find((event) => event.kind === "tool_result" && event.name === "webfetch" && event.content.includes("Full response at "));
+      expect(spillOutput).toBeDefined();
+      expect(res.finalContent).toMatch(/spilled|saved|written|stored|full response at/i);
     },
     300_000,
   );
@@ -593,6 +600,9 @@ describe(`webfetch e2e hard [${LABEL}]`, () => {
       const surface = combinedSurface(trace, res.finalContent);
       const sawV3 = /v3|alice|bob/.test(surface);
       expect(sawV3).toBe(true);
+      expect(trace.toolArgs.some((call) => call.name === "webfetch" && call.args.url === `${sharedServer!.url}/api/v3/users`)).toBe(true);
+      expect(res.finalContent).toMatch(/\balice\b/i);
+      expect(res.finalContent).toMatch(/\bbob\b/i);
     },
     300_000,
   );
