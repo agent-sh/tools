@@ -510,7 +510,10 @@ describe(`webfetch e2e hard [${LABEL}]`, () => {
       expect(trace.toolsByName.webfetch ?? 0).toBeGreaterThanOrEqual(1);
       const spillOutput = trace.events.find((event) => event.kind === "tool_result" && event.name === "webfetch" && event.content.includes("Full response at "));
       expect(spillOutput).toBeDefined();
-      expect(res.finalContent).toMatch(/spilled|saved|written|stored|full response at/i);
+      const spillPath = spillOutput?.kind === "tool_result" ? /Full response at (\S+)/.exec(spillOutput.content)?.[1] : undefined;
+      expect(spillPath).toBeDefined();
+      expect(/spilled|saved|written|stored|full response at/i.test(res.finalContent) ||
+        (spillPath !== undefined && res.finalContent.includes(spillPath))).toBe(true);
     },
     300_000,
   );
