@@ -65,6 +65,7 @@ function expectTaskCompletion(result: Pick<AgentRunResult, "providerRefusal" | "
 function expectReportedBatchCounts(answer: string, expected: { success?: number; failed?: number }) {
   const text = answer.replace(/[*_`]/g, "");
   const quantity = "(?:zero|none|no|one|two|both|\\d+)";
+  const amount = `(?<![\\w.+,/\\-\\u2212])(${quantity})(?!\\w|[.,/]\\d)`;
   const label = "(?:success(?:es|ful(?:ly)?)?|succeeded|failed|failures?)";
   const noun = "(?:targets?|commands?|directories|operations?)";
   const reported = { success: new Set<number>(), failed: new Set<number>() };
@@ -73,8 +74,8 @@ function expectReportedBatchCounts(answer: string, expected: { success?: number;
     reported[kind.toLowerCase().startsWith("fail") ? "failed" : "success"]
       .add(words[count.toLowerCase()] ?? Number(count));
   };
-  const before = new RegExp(`\\b(${quantity})\\s+(?:${noun}\\s+)?(?:(?:were|completed)\\s+)?(${label})\\b`, "gi");
-  const after = new RegExp(`\\b(${label})(?:\\s+(?:${noun}|count))?(?:\\s*[:=]\\s*|\\s+(?:(?:is|was|were)\\s+)?)(${quantity})\\b`, "gi");
+  const before = new RegExp(`${amount}\\s+(?:${noun}\\s+)?(?:(?:were|completed)\\s+)?(${label})\\b`, "gi");
+  const after = new RegExp(`\\b(${label})(?:\\s+(?:${noun}|count))?(?:\\s*[:=]\\s*|\\s+(?:(?:is|was|were)\\s+)?)${amount}`, "gi");
   for (const match of text.matchAll(before)) record(match[1]!, match[2]!);
   for (const match of text.matchAll(after)) record(match[2]!, match[1]!);
   for (const kind of ["success", "failed"] as const) {
@@ -86,13 +87,13 @@ it("requires the final answer to report the executed batch counts", () => {
   for (const answer of ["One target failed; the second was skipped.", "Failure count: 1."]) {
     expect(() => expectReportedBatchCounts(answer, { failed: 1 })).not.toThrow();
   }
-  for (const answer of ["All commands succeeded.", "Done.", "0 failures."]) {
+  for (const answer of ["All commands succeeded.", "Done.", "0 failures.", "-1 failures.", "+1 failures.", "x1 failures.", "1/2 failures.", "1.0 failures.", "Failures: -1.", "Failures: 1.5.", "Failures: 1,000.", "Failures: 1e0.", "Failures: \u22121."]) {
     expect(() => expectReportedBatchCounts(answer, { failed: 1 })).toThrow();
   }
-  for (const answer of ["2 successes; 0 failures.", "Both commands completed successfully with no failures.", "Successful targets: **2**. Failed targets: **0**."]) {
+  for (const answer of ["2 successes; 0 failures.", "Both commands completed successfully with no failures.", "Successful targets: **2**. Failed targets: **0**.", "- 2 successes; 0 failures."]) {
     expect(() => expectReportedBatchCounts(answer, { success: 2, failed: 0 })).not.toThrow();
   }
-  for (const answer of ["Two failures, zero successes.", "2 successes, 0 failures; actually 2 failures.", "2 targets processed."]) {
+  for (const answer of ["Two failures, zero successes.", "2 successes, 0 failures; actually 2 failures.", "2 targets processed.", "-2 successes; 0 failures.", "2 successes; -0 failures.", "Successes: 2.0; Failures: 0.", "Successes: 2e0; Failures: 0."]) {
     expect(() => expectReportedBatchCounts(answer, { success: 2, failed: 0 })).toThrow();
   }
 });
