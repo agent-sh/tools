@@ -69,6 +69,8 @@ function expectReportedBatchCounts(answer: string, expected: { success?: number;
   const reported = { success: new Set<number>(), failed: new Set<number>() };
   const words: Record<string, number> = { zero: 0, none: 0, no: 0, one: 1, two: 2, both: 2 };
   const nouns = new Set(["target", "targets", "command", "commands", "directory", "directories", "operation", "operations"]);
+  const pairedQuantities = new Set<number>();
+  const pairedLabels = new Set<number>();
   const kindOf = (word = "") => /^(?:success(?:es|ful(?:ly)?)?|succeeded)$/.test(word) ? "success" : /^(?:failed|failures?)$/.test(word) ? "failed" : undefined;
   const quantityAt = (index: number) => {
     const token = tokens[index];
@@ -85,19 +87,29 @@ function expectReportedBatchCounts(answer: string, expected: { success?: number;
     return value;
   };
   for (let index = 0; index < tokens.length; index++) {
-    const quantity = quantityAt(index);
+    const quantity = pairedQuantities.has(index) ? undefined : quantityAt(index);
     let next = index + 1;
     if (nouns.has(tokens[next]?.text ?? "")) next++;
     if (["were", "completed"].includes(tokens[next]?.text ?? "")) next++;
     const followingKind = kindOf(tokens[next]?.text);
-    if (quantity !== undefined && followingKind) reported[followingKind].add(quantity);
+    if (quantity !== undefined && followingKind && !pairedLabels.has(next)) {
+      reported[followingKind].add(quantity);
+      pairedQuantities.add(index);
+      pairedLabels.add(next);
+    }
     const kind = kindOf(tokens[index]?.text);
     if (!kind) continue;
     next = index + 1;
     if (nouns.has(tokens[next]?.text ?? "") || tokens[next]?.text === "count") next++;
-    if ([":", "=", "is", "was", "were"].includes(tokens[next]?.text ?? "")) next++;
+    const explicitValue = [":", "=", "is", "was", "were"].includes(tokens[next]?.text ?? "");
+    if (explicitValue) next++;
+    if (pairedLabels.has(index) && !explicitValue) continue;
     const followingQuantity = quantityAt(next);
-    if (followingQuantity !== undefined) reported[kind].add(followingQuantity);
+    if (followingQuantity !== undefined && !pairedQuantities.has(next)) {
+      reported[kind].add(followingQuantity);
+      pairedQuantities.add(next);
+      pairedLabels.add(index);
+    }
   }
   for (const kind of ["success", "failed"] as const) {
     if (expected[kind] !== undefined) expect([...reported[kind]]).toEqual([expected[kind]]);
@@ -111,10 +123,10 @@ it("requires the final answer to report the executed batch counts", () => {
   for (const answer of ["All commands succeeded.", "Done.", "0 failures.", "-1 failures.", "+1 failures.", "x1 failures.", "1x failures.", "1/2 failures.", "Failures: 1 / 2.", "1.0 failures.", "Failures: -1.", "Failures: 1.5.", "Failures: 1,000.", "Failures: 1e0.", "Failures: \u22121."]) {
     expect(() => expectReportedBatchCounts(answer, { failed: 1 })).toThrow();
   }
-  for (const answer of ["2 successes; 0 failures.", "2 successes,0 failures.", "Both commands completed successfully with no failures.", "Successful targets: **2**. Failed targets: **0**.", "- 2 successes; 0 failures."]) {
+  for (const answer of ["2 successes; 0 failures.", "2 successes,0 failures.", "Success count: 2\nFailure count: 0", "Both commands completed successfully with no failures.", "Successful targets: **2**. Failed targets: **0**.", "- 2 successes; 0 failures."]) {
     expect(() => expectReportedBatchCounts(answer, { success: 2, failed: 0 })).not.toThrow();
   }
-  for (const answer of ["Two failures, zero successes.", "2 successes, 0 failures; actually 2 failures.", "2 targets processed.", "-2 successes; 0 failures.", "2 successes; -0 failures.", "Successes: 2.0; Failures: 0.", "Successes: 2e0; Failures: 0."]) {
+  for (const answer of ["Two failures, zero successes.", "2 successes, 0 failures; actually 2 failures.", "2 successes; 0 failures: 2.", "2 targets processed.", "-2 successes; 0 failures.", "2 successes; -0 failures.", "Successes: 2.0; Failures: 0.", "Successes: 2e0; Failures: 0."]) {
     expect(() => expectReportedBatchCounts(answer, { success: 2, failed: 0 })).toThrow();
   }
 });
