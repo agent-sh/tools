@@ -922,8 +922,8 @@ describe(`websearch e2e hard [${LABEL}]`, () => {
           onTrace,
         ),
       );
-      // Contract assertion is on the TOOL OUTPUT, not model phrasing: if the
-      // model passed time_range, the output must carry the honest note.
+      // The tool must disclose an ignored filter, and the final answer must
+      // preserve the uncertainty about the requested recency.
       const toolOutputs = trace.events
         .filter(
           (e): e is AgentTraceEvent & { kind: "tool_result"; content: string } =>

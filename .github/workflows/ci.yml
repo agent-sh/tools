@@ -37,6 +37,9 @@ jobs:
       - name: Test release dependency security and compatibility
         run: pnpm test:dependencies
 
+      - name: Lint model answer assertions
+        run: pnpm lint:harness
+
       - name: Build
         run: pnpm exec turbo run build --filter='!@agent-sh/harness-e2e'
 
