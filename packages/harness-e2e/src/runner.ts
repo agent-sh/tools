@@ -15,6 +15,19 @@ export interface E2ERunOptions {
   readonly temperature?: number;
   readonly think?: boolean;
   readonly onTrace?: (e: AgentTraceEvent) => void;
+  /** Refusal tests inspect the raw result and must assert their own denial contract. */
+  readonly expectedOutcome?: "completion" | "refusal";
+}
+
+function checkedOutcome(result: AgentRunResult, opts: E2ERunOptions): AgentRunResult {
+  if (opts.expectedOutcome === "refusal") return result;
+  if (result.providerRefusal) {
+    throw new Error(`Expected task completion; provider refusal: ${result.providerRefusal.provider}/${result.providerRefusal.reason}`);
+  }
+  if (!result.finalContent.trim() || result.finalContent === "(max turns reached)") {
+    throw new Error("Expected task completion; model returned no completed final answer");
+  }
+  return result;
 }
 
 export function resolveBackend(): E2EBackend {
@@ -55,7 +68,7 @@ export async function runE2E(opts: E2ERunOptions): Promise<AgentRunResult> {
     if (opts.onTrace !== undefined) {
       (bedrockOpts as { onTrace: typeof opts.onTrace }).onTrace = opts.onTrace;
     }
-    return runBedrockAgent(bedrockOpts);
+    return checkedOutcome(await runBedrockAgent(bedrockOpts), opts);
   }
 
   const agentOpts: Parameters<typeof runAgent>[0] = {
@@ -79,5 +92,5 @@ export async function runE2E(opts: E2ERunOptions): Promise<AgentRunResult> {
   if (opts.onTrace !== undefined) {
     (agentOpts as { onTrace: typeof opts.onTrace }).onTrace = opts.onTrace;
   }
-  return runAgent(agentOpts);
+  return checkedOutcome(await runAgent(agentOpts), opts);
 }

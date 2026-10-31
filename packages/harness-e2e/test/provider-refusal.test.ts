@@ -1,11 +1,54 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { bedrockConverse } from "../src/bedrock.js";
 import { runBedrockAgent } from "../src/bedrockAgent.js";
+import { runE2E } from "../src/runner.js";
 
 vi.mock("../src/bedrock.js", () => ({ bedrockConverse: vi.fn() }));
 beforeEach(() => vi.mocked(bedrockConverse).mockReset());
 
 const options = { modelId: "test", tools: [], systemPrompt: "test", userPrompt: "test" };
+const normalTask = { backend: "bedrock" as const, model: "test", tools: [], systemPrompt: "test", userPrompt: "test" };
+
+it.each(["content_filtered", "guardrail_intervened", "end_turn"])("requires a completed normal task rather than an empty %s result", async (stopReason) => {
+  vi.mocked(bedrockConverse).mockResolvedValue({ output: { message: { role: "assistant", content: [] } }, stopReason });
+  await expect(runE2E(normalTask)).rejects.toThrow(/completion|refus/i);
+});
+
+it("rejects normal task refusal after successful tool output even with matching final text", async () => {
+  const execute = vi.fn(async () => "fixture fact: 42");
+  vi.mocked(bedrockConverse)
+    .mockResolvedValueOnce({ output: { message: { role: "assistant", content: [
+      { toolUse: { toolUseId: "fact", name: "lookup", input: {} } },
+    ] } }, stopReason: "tool_use" })
+    .mockResolvedValueOnce({ output: { message: { role: "assistant", content: [{ text: "fixture fact: 42" }] } }, stopReason: "content_filtered" });
+  await expect(runE2E({ ...normalTask, tools: [{ tool: {
+    type: "function", function: { name: "lookup", description: "test", parameters: {} },
+  }, execute }] })).rejects.toThrow(/refus/i);
+  expect(execute).toHaveBeenCalledTimes(1);
+});
+
+it("retains raw provider provenance for an explicitly expected refusal", async () => {
+  vi.mocked(bedrockConverse).mockResolvedValue({ output: { message: { role: "assistant", content: [] } }, stopReason: "content_filtered" });
+  const result = await runE2E({ ...normalTask, expectedOutcome: "refusal" });
+  expect(result.providerRefusal).toEqual({ provider: "bedrock", reason: "content_filtered" });
+  expect(result.finalContent).toBe("");
+  expect(result.toolCalls).toEqual([]);
+});
+
+it("accepts an ordinary completed normal task", async () => {
+  vi.mocked(bedrockConverse).mockResolvedValue({ output: { message: { role: "assistant", content: [{ text: "fixture fact: 42" }] } }, stopReason: "end_turn" });
+  await expect(runE2E(normalTask)).resolves.toHaveProperty("finalContent", "fixture fact: 42");
+});
+
+it("rejects max-turn exhaustion as normal task completion", async () => {
+  const execute = vi.fn(async () => "fixture fact: 42");
+  vi.mocked(bedrockConverse).mockResolvedValue({ output: { message: { role: "assistant", content: [
+    { toolUse: { toolUseId: "fact", name: "lookup", input: {} } },
+  ] } }, stopReason: "tool_use" });
+  await expect(runE2E({ ...normalTask, maxTurns: 1, tools: [{ tool: {
+    type: "function", function: { name: "lookup", description: "test", parameters: {} },
+  }, execute }] })).rejects.toThrow(/completion/i);
+});
 
 it.each(["content_filtered", "guardrail_intervened"] as const)("retains explicit Bedrock %s without inventing a text response", async (stopReason) => {
   vi.mocked(bedrockConverse).mockResolvedValue({ output: { message: { role: "assistant", content: [] } }, stopReason });
