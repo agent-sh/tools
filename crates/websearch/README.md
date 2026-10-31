@@ -1,6 +1,6 @@
 # harness-websearch
 
-Web search for AI agent harnesses — **works with no API key and no setup**. With nothing configured it queries a bundled keyless fallback chain (Exa → Parallel → Mojeek → Marginalia → Wikipedia) and returns the first backend that has results. Exa and Parallel run their own web indexes and are reached through their official keyless MCP endpoints. Optionally upgrade to Brave/Tavily (API key) or a self-hosted SearXNG. Tool-layer SSRF defense, a permission hook, a result-count cap, engine provenance, and a discriminated `ok`/`empty`/`error` result surface.
+Web search for AI agent harnesses — **works with no API key and no setup**. With nothing configured it queries a bundled keyless fallback chain (Exa → Parallel → Mojeek → Marginalia → Wikipedia) and merges results across the chain until `count` is met. Exa and Parallel run their own web indexes and are reached through their official keyless MCP endpoints. Optionally upgrade to Brave/Tavily (API key) or a self-hosted SearXNG. Tool-layer SSRF defense, a permission hook, a result-count cap, engine provenance, and a discriminated `ok`/`empty`/`error` result surface.
 
 Rust port of [`@agent-sh/harness-websearch`](https://www.npmjs.com/package/@agent-sh/harness-websearch). Part of the [`harness-*`](https://github.com/agent-sh/tools) monorepo — see the top-level README for architectural context. WebSearch finds; [`webfetch`](https://github.com/agent-sh/tools/tree/main/crates/webfetch) reads — they compose.
 
@@ -8,7 +8,7 @@ Rust port of [`@agent-sh/harness-websearch`](https://www.npmjs.com/package/@agen
 
 ```toml
 [dependencies]
-harness-websearch = "0.1"
+harness-websearch = "0.2"
 ```
 
 ## Usage

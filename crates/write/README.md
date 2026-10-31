@@ -8,7 +8,7 @@ Rust port of [`@agent-sh/harness-write`](https://www.npmjs.com/package/@agent-sh
 
 ```toml
 [dependencies]
-harness-write = "0.1"
+harness-write = "0.3"
 ```
 
 ## Usage

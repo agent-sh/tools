@@ -15,7 +15,8 @@ Requires Node ≥ 20.
 ## Usage
 
 ```ts
-import { edit, InMemoryLedger } from "@agent-sh/harness-write";
+import { edit } from "@agent-sh/harness-write";
+import { InMemoryLedger } from "@agent-sh/harness-core";
 
 const ledger = new InMemoryLedger();
 // ... after the model Reads the file, the read-executor records into ledger ...

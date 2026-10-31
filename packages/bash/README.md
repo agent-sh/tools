@@ -15,7 +15,7 @@ Requires Node ≥ 20.
 ## Usage
 
 ```ts
-import { bash, bash_output, bash_kill, createLocalBashExecutor } from "@agent-sh/harness-bash";
+import { bash, bashOutput, bashKill, createLocalBashExecutor } from "@agent-sh/harness-bash";
 
 const session = {
   cwd: process.cwd(),

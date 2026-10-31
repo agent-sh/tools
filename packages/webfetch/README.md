@@ -21,7 +21,7 @@ SSRF defenses stay on; `HARNESS_WEB_FETCH_ALLOW_LOOPBACK=1` opts into localhost.
 npm install @agent-sh/harness-webfetch
 ```
 
-Requires Node ≥ 20.
+Requires Node 22.22.2+, 24.15.0+ or 26+.
 
 ## Usage
 

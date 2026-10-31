@@ -8,7 +8,7 @@ Rust port of [`@agent-sh/harness-tools`](https://www.npmjs.com/package/@agent-sh
 
 ```toml
 [dependencies]
-harness-tools = "0.1"
+harness-tools = "0.4"
 ```
 
 ## Usage
@@ -16,7 +16,7 @@ harness-tools = "0.1"
 Each tool is re-exposed as a submodule. Import what you need:
 
 ```rust
-use harness_tools::{read, write, grep, glob, bash, webfetch, websearch, lsp, skill};
+use harness_tools::{read, write, grep, glob, bash, batch, webfetch, websearch, lsp, skill};
 // e.g.
 let r = read::read(serde_json::json!({ "path": "src/main.rs" }), &session).await;
 ```
@@ -33,8 +33,9 @@ If you only need one tool, depend on its individual crate (for example [`harness
 | [`harness-grep`](https://crates.io/crates/harness-grep) | ripgrep-backed search with discriminated output modes. |
 | [`harness-glob`](https://crates.io/crates/harness-glob) | File discovery by pattern, ignore-aware. |
 | [`harness-bash`](https://crates.io/crates/harness-bash) | Shell with cwd-carry + timeouts + background jobs. |
+| [`harness-batch`](https://crates.io/crates/harness-batch) | Run one shell command across many directories. |
 | [`harness-webfetch`](https://crates.io/crates/harness-webfetch) | HTTP with SSRF defense + readability markdown extraction. |
-| [`harness-websearch`](https://crates.io/crates/harness-websearch) | Web search via a session-configured SearXNG backend. |
+| [`harness-websearch`](https://crates.io/crates/harness-websearch) | Web search with no API key (keyless Exa → Parallel → Mojeek → Marginalia → Wikipedia chain), optionally Brave, Tavily or SearXNG. |
 | [`harness-lsp`](https://crates.io/crates/harness-lsp) | Language-server operations with 1-indexed positions. |
 | [`harness-skill`](https://crates.io/crates/harness-skill) | [Agent Skills](https://agentskills.io) activation. |
 

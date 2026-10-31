@@ -55,7 +55,7 @@ npm install @agent-sh/harness-tools        # everything
 npm install @agent-sh/harness-websearch    # or just the tools you need
 ```
 
-Node.js ≥ 20. ESM and CommonJS builds, with TypeScript types.
+Node.js ≥ 20 for the single-tool packages. `@agent-sh/harness-tools`, `@agent-sh/harness-webfetch` and `@agent-sh/harness-web-mcp` need Node 22.22.2+, 24.15.0+ or 26+. ESM and CommonJS builds, with TypeScript types.
 
 ## Web search and fetch in Claude Code and Codex
 
@@ -137,6 +137,7 @@ Permissions fail closed.
 - **`sensitivePatterns`** blocks secrets even inside the workspace. `DEFAULT_SENSITIVE_PATTERNS` covers `.env*`, SSH and TLS keys, `~/.aws/credentials`, service-account JSON and similar.
 - **`hook(request) => "allow" | "deny"`** decides anything that leaves the fence or touches the outside world. `request` carries the tool, path, action and metadata.
 - Tools with side effects outside the workspace (`bash`, `webfetch`, `websearch`, `lsp`, `skill`) **refuse to run without a hook**. For scripts and tests you can opt out explicitly with `unsafeAllowBashWithoutHook`, `unsafeAllowFetchWithoutHook`, `unsafeAllowSearchWithoutHook`, `unsafeAllowLspWithoutHook` or `unsafeAllowSkillWithoutHook`. The names are deliberately loud.
+- **`batch` has no permission hook.** `executeBatch(params, workspaceRoot)` runs the command with `bash -c` in every target and only drops targets that resolve outside `workspaceRoot`. Validate input with `safeParseBatchParams` and gate the call yourself.
 
 ## Design principles
 
@@ -146,7 +147,7 @@ The textual surface of a tool (its name, description, field names, error message
 - **Recovery hints in every error.** `NOT_FOUND` lists likely siblings, `OLD_STRING_NOT_UNIQUE` lists every match location, and `INVALID_REGEX` explains the escape. The model is expected to fix the call and retry.
 - **Alias pushback.** Send `file_path` instead of `path` and you get a targeted "did you mean `path`?" instead of a generic schema error.
 - **Bounded output.** Pagination, size caps, and head+tail spill-to-file keep one call from flooding the context window.
-- **Tested against real models.** [`packages/harness-e2e`](./packages/harness-e2e) runs real tool-call loops for every tool on four Ollama models plus Claude Opus on Bedrock, and checks each run against committed baselines.
+- **Tested against real models.** [`packages/harness-e2e`](./packages/harness-e2e) runs real tool-call loops for every tool on four Ollama models plus Claude Opus on Bedrock, and checks each run against a recorded baseline.
 - **Spec first.** Each tool's contract lives in [`agent-knowledge/design/`](./agent-knowledge/design/). Code and spec change together.
 
 More in [`AGENTS.md`](./AGENTS.md).
@@ -184,9 +185,9 @@ pnpm build && pnpm test && pnpm typecheck    # TypeScript (pnpm 9)
 cargo test --workspace                       # Rust (stable toolchain)
 ```
 
-**End-to-end runs against real models.** `packages/harness-e2e` drives tool-call loops on `gemma4:e2b`, `gemma4:26b`, `qwen3:8b` and `qwen3.5:27b-q4_K_M` (Ollama), plus Claude Opus on Bedrock. Baselines in `packages/harness-e2e/baselines/` encode what "good" looks like per tool and model; `pnpm --filter @agent-sh/harness-e2e aggregate:<tool>:check` compares a fresh run against them.
+**End-to-end runs against real models.** `packages/harness-e2e` drives tool-call loops on `gemma4:e2b`, `gemma4:26b`, `qwen3:8b` and `qwen3.5:27b-q4_K_M` (Ollama), plus Claude Opus on Bedrock. Baselines in `packages/harness-e2e/baselines/` (gitignored, recorded locally with `aggregate:<tool>:update`) encode what "good" looks like per tool and model; `pnpm --filter @agent-sh/harness-e2e aggregate:<tool>:check` compares a fresh run against them.
 
-**Releases** use [Changesets](https://github.com/changesets/changesets). Add one with `pnpm changeset` in your PR. On merge to `main`, the release workflow opens a "Version Packages" PR, and merging that publishes to npm. Rust crates publish from version tags. Required repository secrets: `NPM_TOKEN` (publish rights on the `@agent-sh` scope) and `CARGO_REGISTRY_TOKEN`.
+**Releases** use [Changesets](https://github.com/changesets/changesets). Add one with `pnpm changeset` in your PR. On merge to `main`, the release workflow opens a "chore: version packages" PR, and merging that publishes to npm. Rust crates publish from version tags. Required repository secrets: `NPM_TOKEN` (publish rights on the `@agent-sh` scope) and `CARGO_REGISTRY_TOKEN`.
 
 **Contributing.** The specs in [`agent-knowledge/design/`](./agent-knowledge/design/) are canonical: a behavior change updates the spec in the same PR, and vice versa. See [`AGENTS.md`](./AGENTS.md).
 

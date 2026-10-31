@@ -10,7 +10,7 @@ Part of the [`@agent-sh/harness-*`](https://github.com/agent-sh/tools) monorepo 
 npm install @agent-sh/harness-tools
 ```
 
-Requires Node ≥ 20.
+Requires Node 22.22.2+, 24.15.0+ or 26+.
 
 ## Usage
 
