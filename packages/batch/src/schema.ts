@@ -120,6 +120,15 @@ export function safeParseBatchParams(input: unknown):
   }
   const result = v.safeParse(BatchParamsSchema, input);
   if (result.success) return { ok: true, value: result.output };
+  if (input !== null && typeof input === "object" && "targets" in input) {
+    const targetResult = v.safeParse(BatchTargetSchema, input.targets);
+    if (!targetResult.success) {
+      return { ok: false, issues: makeAliasIssues([
+        ...result.issues.map((issue) => issue.message),
+        'targets must be an object, not a JSON string. Use targets: { kind: "explicit", paths: ["/workspace/a", "/workspace/b"] }, { kind: "subdirs", path: "/workspace" }, or { kind: "glob", pattern: "/workspace/*" }. The discriminator is kind; mode is only for sequential/parallel execution.',
+      ]) };
+    }
+  }
   return { ok: false, issues: result.issues };
 }
 
@@ -130,9 +139,10 @@ export const BATCH_TOOL_NAME = "batch";
 export const BATCH_TOOL_DESCRIPTION = `Execute a shell command across multiple directories. Use for batch git operations, bulk file operations, workspace builds, etc.
 
 Supports three target modes:
-- subdirs: run in each immediate subdirectory of a path
-- glob: run in each path matching a glob pattern
-- explicit: run in each explicitly listed path
+- targets: { kind: "subdirs", path: "/workspace" } runs in each immediate subdirectory
+- targets: { kind: "glob", pattern: "/workspace/*" } runs in each matching directory
+- targets: { kind: "explicit", paths: ["/workspace/a", "/workspace/b"] } runs in the listed directories
+targets is an object, never a JSON-encoded string. Its discriminator is kind. The separate mode field controls execution, not target selection.
 
 Execution modes:
 - sequential: run one at a time, accumulate results
@@ -154,6 +164,16 @@ export const batchToolDefinition: ToolDefinition = {
           "Shell command to run in each target. Use $TARGET to reference the current directory.",
       },
       targets: {
+        type: "object",
+        description: "Target selector object, not a JSON string. Set kind to subdirs, glob or explicit, with the corresponding path, pattern or paths field.",
+        properties: {
+          kind: { type: "string", enum: ["subdirs", "glob", "explicit"], description: "Target selection: subdirs uses path, glob uses pattern, explicit uses paths." },
+          path: { type: "string", description: "Root directory when kind is subdirs." },
+          name_filter: { type: "string", description: "Optional subdirectory name glob for kind subdirs." },
+          pattern: { type: "string", description: "Directory glob when kind is glob." },
+          paths: { type: "array", items: { type: "string" }, description: "Directory paths when kind is explicit." },
+        },
+        required: ["kind"],
         oneOf: [
           {
             type: "object",

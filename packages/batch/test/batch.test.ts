@@ -45,6 +45,21 @@ describe("batch schema", () => {
     expect(result.ok).toBe(false);
   });
 
+  it.each([
+    '{"kind":"explicit","paths":["/workspace/a"]}',
+    { mode: "explicit", paths: ["/workspace/a"] },
+    { kind: "explicit", paths: [], command: "pwd" },
+  ])("rejects malformed selectors with an object recovery example", (targets) => {
+    const result = safeParseBatchParams({ command: "pwd", targets });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const message = result.issues.map((issue) => issue.message).join(" ");
+      expect(message).toContain('kind: "explicit"');
+      expect(message).toContain("not a JSON string");
+      expect(message).toContain("mode is only for sequential/parallel");
+    }
+  });
+
   it("rejects empty explicit paths", () => {
     const result = safeParseBatchParams({
       command: "echo hello",
