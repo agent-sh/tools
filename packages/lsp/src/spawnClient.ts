@@ -87,6 +87,12 @@ interface ServerEntry {
   closed: boolean;
   /** Set once the server is taken out of service and being stopped. */
   stopping: Promise<void> | undefined;
+  /**
+   * Why the start failed, kept while no caller has seen it: the caller that
+   * began the start gave up before it ended. The next ensureServer for this
+   * key reports it once, then the call after that starts a new server.
+   */
+  unreportedStartError: unknown;
   /** didOpen per path: in flight or done. A failed open is dropped and retried. */
   readonly openedFiles: Map<string, Promise<void>>;
   state: "starting" | "ready" | "crashed";
@@ -227,6 +233,11 @@ export function createSpawnLspClient(
       return existing.handle;
     }
     if (args.signal?.aborted) throw new Error("aborted");
+    if (existing?.unreportedStartError !== undefined) {
+      const reason = existing.unreportedStartError;
+      servers.delete(k);
+      throw reason;
+    }
 
     const [cmd, ...cmdArgs] = args.profile.command;
     if (!cmd) {
@@ -274,6 +285,7 @@ export function createSpawnLspClient(
       stderr: () => stderrTail.toString("utf8").trim(),
       closed: false,
       stopping: undefined,
+      unreportedStartError: undefined,
       openedFiles: new Map(),
       state: "starting",
     };
@@ -377,14 +389,22 @@ export function createSpawnLspClient(
         return readyHandle;
       } catch (e) {
         retire(entry);
+        entry.unreportedStartError = e;
         throw e;
       }
     })();
     // An abort releases the caller only. The handshake goes on, bounded by
     // initializeTimeoutMs, and the next call finds the server starting or
-    // ready. This handler keeps a failure nobody waits for handled.
+    // ready, or is told why the start failed. This handler keeps a failure
+    // nobody waits for handled.
     starting.catch(() => {});
-    return args.signal ? withAbort(() => starting, args.signal) : starting;
+    try {
+      return await (args.signal ? withAbort(() => starting, args.signal) : starting);
+    } catch (e) {
+      // This caller got the start's own error: it is reported.
+      if (e === entry.unreportedStartError) entry.unreportedStartError = undefined;
+      throw e;
+    }
   }
 
   async function requireReady(h: ServerHandle): Promise<ServerEntry> {

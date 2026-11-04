@@ -5,7 +5,9 @@ export const SESSION_BACKSTOP_MS = 60_000;
  * Default bound for the spawn client's `initialize` handshake. It is the
  * session backstop, which also caps every tool call's budget, so with the
  * defaults a start outlives the call that began it and a later call finds
- * the server starting or ready.
+ * the server starting or ready. Keep it above the session's call budget
+ * (`defaultTimeoutMs`): when the two are equal, the call gives up first and
+ * the next call only learns that the start failed.
  */
 export const DEFAULT_INITIALIZE_TIMEOUT_MS = SESSION_BACKSTOP_MS;
 export const SERVER_STARTUP_MAX_WAIT_MS = 5_000;

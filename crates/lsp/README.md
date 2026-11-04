@@ -8,7 +8,7 @@ Rust port of [`@agent-sh/harness-lsp`](https://www.npmjs.com/package/@agent-sh/h
 
 ```toml
 [dependencies]
-harness-lsp = "0.1"
+harness-lsp = "0.2"
 ```
 
 ## Usage

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_INITIALIZE_TIMEOUT_MS,
   DEFAULT_TIMEOUT_MS,
@@ -9,7 +9,7 @@ import {
 } from "../src/constants.js";
 import { lsp } from "../src/lsp.js";
 import { createSpawnLspClient } from "../src/spawnClient.js";
-import type { LspServerProfile } from "../src/types.js";
+import type { LspClient, LspServerProfile } from "../src/types.js";
 import { makeSession, makeTempDir, write } from "./helpers.js";
 
 const FAKE_SERVER = fileURLToPath(
@@ -33,7 +33,8 @@ type FakeMode =
   | "die-on-hover"
   | "close-stdin-on-hover"
   | "close-stdout-on-hover"
-  | "slow-initialize";
+  | "slow-initialize"
+  | "slow-die-on-initialize";
 
 // Cases that hung before their fix get a short limit, so a regression fails
 // fast instead of at the 30s default.
@@ -72,6 +73,10 @@ function didOpens(stateDir: string): string[] {
 }
 
 const POS = { line: 1, character: 1 };
+
+function spawnCount(stateDir: string): number {
+  return readFileSync(path.join(stateDir, "spawns"), "utf8").trim().split("\n").length;
+}
 
 let root: string;
 let unhandled: unknown[];
@@ -661,11 +666,22 @@ describe("spawn client: startup", () => {
   });
 
   it("says a call cancelled during a start was cancelled, not timed out", async () => {
-    const client = createSpawnLspClient();
+    // Cancel once the start has begun, not on a clock, so a slow machine
+    // cannot make the cancel land before the call reaches the server.
+    const inner = createSpawnLspClient();
+    const cancel = new AbortController();
+    const client: LspClient = {
+      ...inner,
+      ensureServer: (args) => {
+        const starting = inner.ensureServer(args);
+        cancel.abort();
+        return starting;
+      },
+    };
     const file = write(root, "a.fake", "x\n");
     const session = makeSession(root, client, {
       manifest: { servers: { fake: fakeProfile("silent-on-initialize", root) } },
-      signal: AbortSignal.timeout(200),
+      signal: cancel.signal,
     });
     try {
       expect(
@@ -677,6 +693,79 @@ describe("spawn client: startup", () => {
           message: expect.stringContaining("was cancelled while the fake server was starting"),
         },
       });
+    } finally {
+      await client.closeSession();
+    }
+  }, HANG_LIMIT_MS);
+
+  it("bounds initialize by DEFAULT_INITIALIZE_TIMEOUT_MS by default", async () => {
+    const client = createSpawnLspClient();
+    // Fake only the timers; the server process and its pipes stay real.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const outcome = client
+        .ensureServer({ language: "fake", root, profile: fakeProfile("silent-on-initialize", root) })
+        .then(() => "ready", (e: unknown) => (e as Error).message);
+      let settled: string | undefined;
+      void outcome.then((m) => (settled = m));
+      await vi.advanceTimersByTimeAsync(DEFAULT_TIMEOUT_MS + 1);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(DEFAULT_INITIALIZE_TIMEOUT_MS - DEFAULT_TIMEOUT_MS);
+      expect(await outcome).toContain(`within ${DEFAULT_INITIALIZE_TIMEOUT_MS}ms`);
+    } finally {
+      vi.useRealTimers();
+      await client.closeSession();
+    }
+  }, HANG_LIMIT_MS);
+
+  it("reports a start that hit the initialize limit after its call gave up, once", async () => {
+    const client = createSpawnLspClient({ initializeTimeoutMs: 800 });
+    const file = write(root, "a.fake", "x\n");
+    const session = makeSession(root, client, {
+      manifest: { servers: { fake: fakeProfile("silent-on-initialize", root) } },
+      defaultTimeoutMs: 300,
+    });
+    const hover = { operation: "hover", path: file, line: 1, character: 1 };
+    try {
+      expect(await lsp(hover, session)).toMatchObject({ kind: "error", error: { code: "TIMEOUT" } });
+      // Past the 800ms limit, with room for a slow machine.
+      await settle(1_500);
+      expect(await lsp(hover, session)).toMatchObject({
+        kind: "error",
+        error: {
+          code: "SERVER_NOT_AVAILABLE",
+          message: expect.stringContaining("did not answer initialize within 800ms"),
+        },
+      });
+      expect(spawnCount(root)).toBe(1);
+      // Reported once: the next call starts a new server.
+      expect(await lsp(hover, session)).toMatchObject({ kind: "error", error: { code: "TIMEOUT" } });
+      expect(spawnCount(root)).toBe(2);
+    } finally {
+      await client.closeSession();
+    }
+  }, HANG_LIMIT_MS);
+
+  it("reports the exit code and stderr of a start that died after its call gave up", async () => {
+    const client = createSpawnLspClient({ initializeTimeoutMs: 3_000 });
+    const file = write(root, "a.fake", "x\n");
+    const session = makeSession(root, client, {
+      manifest: { servers: { fake: fakeProfile("slow-die-on-initialize", root) } },
+      defaultTimeoutMs: 300,
+    });
+    const hover = { operation: "hover", path: file, line: 1, character: 1 };
+    try {
+      expect(await lsp(hover, session)).toMatchObject({ kind: "error", error: { code: "TIMEOUT" } });
+      // The server exits 800ms into the start.
+      await settle(1_500);
+      expect(await lsp(hover, session)).toMatchObject({
+        kind: "error",
+        error: {
+          code: "SERVER_NOT_AVAILABLE",
+          message: expect.stringMatching(/exited with code 3[\s\S]*missing config, giving up/),
+        },
+      });
+      expect(spawnCount(root)).toBe(1);
     } finally {
       await client.closeSession();
     }

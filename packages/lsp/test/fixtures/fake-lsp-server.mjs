@@ -26,6 +26,8 @@
 //   die-on-initialize          writes to stderr and exits with code 3
 //                              instead of answering `initialize`.
 //   silent-on-initialize       never answers `initialize`.
+//   slow-die-on-initialize     writes to stderr and exits with code 3 800ms
+//                              after `initialize`, without answering it.
 //   slow-initialize            answers `initialize` after 800ms, or after
 //                              FAKE_INITIALIZE_DELAY_MS when that is set.
 //   flood-stderr-on-initialize writes FLOOD_BYTES to stderr, then answers
@@ -105,6 +107,10 @@ function handle(message) {
       }
       if (mode === "die-on-initialize") return die(3, "fake server: cannot start\n");
       if (mode === "silent-on-initialize") return;
+      if (mode === "slow-die-on-initialize") {
+        setTimeout(() => die(3, "fake server: missing config, giving up\n"), 800);
+        return;
+      }
       if (mode === "slow-initialize") {
         const delay = Number(process.env.FAKE_INITIALIZE_DELAY_MS ?? 800);
         setTimeout(() => send({ id: message.id, result: { capabilities: { hoverProvider: true } } }), delay);
