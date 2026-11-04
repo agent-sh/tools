@@ -60,7 +60,8 @@ interface ServerEntry {
   readonly conn: MessageConnection;
   /** Resolves when the process has exited. */
   readonly exited: Promise<void>;
-  readonly openedFiles: Set<string>;
+  /** didOpen per path: in flight or done. A failed open is dropped and retried. */
+  readonly openedFiles: Map<string, Promise<void>>;
   state: "starting" | "ready" | "crashed";
 }
 
@@ -79,25 +80,42 @@ export function createSpawnLspClient(): LspClient {
     }
   }
 
-  async function didOpenIfNeeded(
+  /**
+   * Send didOpen once per (server, path). Concurrent callers share the one
+   * in flight. Callers wait for it under their operation signal, so a
+   * server that stops reading stdin cannot hold an operation past its
+   * timeout.
+   */
+  function didOpenIfNeeded(
     entry: ServerEntry,
     filePath: string,
   ): Promise<void> {
-    if (entry.openedFiles.has(filePath)) return;
-    const text = await readFileText(filePath);
-    const uri = pathToFileURL(filePath).toString();
-    const languageId = entry.handle.language;
-    // Await the write: if the server's stdin broke, the caller's operation
-    // fails with that error instead of it going unhandled.
-    await entry.conn.sendNotification("textDocument/didOpen", {
-      textDocument: {
-        uri,
-        languageId,
-        version: 1,
-        text,
-      },
+    const existing = entry.openedFiles.get(filePath);
+    if (existing) return existing;
+    const opening = (async () => {
+      const text = await readFileText(filePath);
+      const uri = pathToFileURL(filePath).toString();
+      const languageId = entry.handle.language;
+      // Await the write: if the server's stdin broke, the caller's
+      // operation fails with that error instead of it going unhandled.
+      await entry.conn.sendNotification("textDocument/didOpen", {
+        textDocument: {
+          uri,
+          languageId,
+          version: 1,
+          text,
+        },
+      });
+    })();
+    entry.openedFiles.set(filePath, opening);
+    // A failed open is retried by the next call. This handler also keeps
+    // an open whose callers all gave up from ever going unhandled.
+    opening.catch(() => {
+      if (entry.openedFiles.get(filePath) === opening) {
+        entry.openedFiles.delete(filePath);
+      }
     });
-    entry.openedFiles.add(filePath);
+    return opening;
   }
 
   async function ensureServer(args: {
@@ -151,7 +169,7 @@ export function createSpawnLspClient(): LspClient {
       proc,
       conn,
       exited,
-      openedFiles: new Set(),
+      openedFiles: new Map(),
       state: "starting",
     };
     servers.set(k, entry);
@@ -231,10 +249,10 @@ export function createSpawnLspClient(): LspClient {
     signal: AbortSignal,
   ): Promise<LspHoverResult | null> {
     const entry = requireReady(h);
-    await didOpenIfNeeded(entry, filePath);
+    await withAbort(() => didOpenIfNeeded(entry, filePath), signal);
     const uri = pathToFileURL(filePath).toString();
     const result = await withAbort<Hover | null>(
-      entry.conn.sendRequest("textDocument/hover", {
+      () => entry.conn.sendRequest("textDocument/hover", {
         textDocument: { uri },
         position: toLspPosition(pos),
       }),
@@ -254,7 +272,7 @@ export function createSpawnLspClient(): LspClient {
     signal: AbortSignal,
   ): Promise<readonly LspLocation[]> {
     const entry = requireReady(h);
-    await didOpenIfNeeded(entry, filePath);
+    await withAbort(() => didOpenIfNeeded(entry, filePath), signal);
     const uri = pathToFileURL(filePath).toString();
     const body: Record<string, unknown> = {
       textDocument: { uri },
@@ -264,7 +282,7 @@ export function createSpawnLspClient(): LspClient {
       body.context = { includeDeclaration: true };
     }
     const result = await withAbort<Location[] | LocationLink[] | null>(
-      entry.conn.sendRequest(method, body),
+      () => entry.conn.sendRequest(method, body),
       signal,
     );
     if (!result) return [];
@@ -306,12 +324,12 @@ export function createSpawnLspClient(): LspClient {
     signal: AbortSignal,
   ): Promise<readonly LspSymbolInfo[]> {
     const entry = requireReady(h);
-    await didOpenIfNeeded(entry, filePath);
+    await withAbort(() => didOpenIfNeeded(entry, filePath), signal);
     const uri = pathToFileURL(filePath).toString();
     const result = await withAbort<
       DocumentSymbol[] | SymbolInformation[] | null
     >(
-      entry.conn.sendRequest("textDocument/documentSymbol", {
+      () => entry.conn.sendRequest("textDocument/documentSymbol", {
         textDocument: { uri },
       }),
       signal,
@@ -355,7 +373,7 @@ export function createSpawnLspClient(): LspClient {
   ): Promise<readonly LspSymbolInfo[]> {
     const entry = requireReady(h);
     const result = await withAbort<SymbolInformation[] | null>(
-      entry.conn.sendRequest("workspace/symbol", { query }),
+      () => entry.conn.sendRequest("workspace/symbol", { query }),
       signal,
     );
     if (!result) return [];
@@ -393,8 +411,10 @@ export function createSpawnLspClient(): LspClient {
 
   /**
    * Stop one server: `shutdown` and `exit`, then SIGTERM, then SIGKILL,
-   * each step bounded by STOP_STEP_MS. No signal is sent before the `exit`
-   * write settles, so the write never races the process going away.
+   * each step bounded by STOP_STEP_MS. A server that is not ready skips
+   * `shutdown` and `exit`. No signal is sent before the `exit` write
+   * settles, so the write never races the process going away. Returns once
+   * the process has exited, or STOP_STEP_MS after SIGKILL.
    */
   async function stopServer(entry: ServerEntry): Promise<void> {
     const { proc, conn, exited } = entry;
@@ -411,6 +431,7 @@ export function createSpawnLspClient(): LspClient {
       proc.kill("SIGTERM");
       if ((await within(exited, STOP_STEP_MS)) !== TIMED_OUT) return;
       proc.kill("SIGKILL");
+      await within(exited, STOP_STEP_MS);
     } finally {
       conn.dispose();
     }
@@ -505,11 +526,18 @@ function flattenHoverContents(
   return { text: "", isMarkdown: false };
 }
 
+/**
+ * Run `start` under `signal`. Nothing is sent when the signal is already
+ * aborted. On a later abort the caller gets "aborted" and the abandoned
+ * promise stays handled, so a rejection that comes after (for example when
+ * closeSession disposes the connection) is never unhandled.
+ */
 async function withAbort<T>(
-  promise: Promise<T>,
+  start: () => Promise<T>,
   signal: AbortSignal,
 ): Promise<T> {
   if (!signal.aborted) {
+    const promise = start();
     return new Promise<T>((resolve, reject) => {
       const onAbort = () => {
         signal.removeEventListener("abort", onAbort);
