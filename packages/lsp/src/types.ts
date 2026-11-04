@@ -54,7 +54,12 @@ export interface LspManifest {
 export interface ServerHandle {
   readonly language: string;
   readonly root: string;
-  readonly state: "starting" | "ready" | "crashed";
+  /**
+   * `ensureServer` never returns a crashed server: it starts a new one, or
+   * rejects. A call that sees a server die rejects with
+   * LspServerCrashedError instead.
+   */
+  readonly state: "starting" | "ready";
 }
 
 export interface LspLocation {
@@ -80,10 +85,16 @@ export interface LspHoverResult {
 }
 
 export interface LspClient {
+  /**
+   * Start or reuse the server for (language, root). `signal` bounds the
+   * caller's wait; a server still starting when it aborts keeps starting,
+   * and a later call gets it as `starting` or `ready`.
+   */
   ensureServer(args: {
     language: string;
     root: string;
     profile: LspServerProfile;
+    signal?: AbortSignal;
   }): Promise<ServerHandle>;
 
   hover(

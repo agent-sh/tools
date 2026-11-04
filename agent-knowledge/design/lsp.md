@@ -237,7 +237,7 @@ Hint is operation-specific:
 | `PERMISSION_DENIED` | Hook returned deny. |
 | `SERVER_NOT_AVAILABLE` | No `.lsp.json` entry for the language; the model can fall back to grep. Hint: `"No language server configured for {language} ({ext}). Configure one in .lsp.json or session config."` |
 | `POSITION_INVALID` | `line > file.length` OR `character > line.length`. Hint includes the actual bounds. |
-| `SERVER_CRASHED` | Language server process died. The tool tries to restart it transparently on next call; this error surfaces for THIS call. |
+| `SERVER_CRASHED` | Language server process died, or lost a pipe, while this call was using it. The next call starts a new server. |
 | `TIMEOUT` | Server didn't respond within the per-op timeout (default 30s). Server might be CPU-bound; retry or narrow. |
 | `IO_ERROR` | Unexpected protocol / IO failure; preserve `cause`. |
 
@@ -317,10 +317,12 @@ The handshake itself is bounded. `initialize` gets the per-operation timeout (`D
 
 ### 5.5 Crash handling
 
-- If the server exits unexpectedly, the next operation gets `SERVER_CRASHED` and the tool transparently re-spawns on the call AFTER that.
+- If the server exits while no call is using it, the next call's `ensureServer` starts a new one and that call proceeds. `ensureServer` never returns a crashed handle: `ServerHandle.state` is `starting` or `ready`.
+- A call that sees the server die gets `SERVER_CRASHED`, and the call after it starts a new server.
 - A request in flight when the process exits rejects at once with `LspServerExitedError` (exit code or signal, plus the server's last stderr output). It does not wait for the per-op timeout. The tool returns it as `SERVER_CRASHED` for that call.
 - The client always drains the server's stderr, so a server that writes a lot of it never blocks on a full pipe. Only the last 4 KB is kept, for that error.
-- A server whose stdin breaks while the process lives can never take another message. The write that found it fails that call, and the client marks the server crashed and stops it, so the next call starts a new one.
+- A server whose stdin breaks while the process lives can never take another message. The write that found it fails that call with `LspServerCrashedError` (`SERVER_CRASHED`), and the client marks the server crashed and stops it, so the next call starts a new one.
+- A server whose stdout closes while the process lives can never answer again. It gets one stop step (2s) to exit on its own. If it does not, it is retired the same way, and every call waiting on it gets `SERVER_CRASHED`.
 - Deliberately don't auto-retry within the same call: the model gets to see the crash, decide whether the request was the cause (malformed position, etc.), and retry or not.
 
 ---
@@ -372,7 +374,7 @@ LSP servers track `textDocument/didOpen` and `textDocument/didChange` to underst
 
 ## 8. Timeouts
 
-- Default 30s per operation.
+- Default 30s per tool call, starting the server included. The call's signal reaches `ensureServer`. When the start outlasts it, the call returns `TIMEOUT` and the server keeps starting (bounded by the client's `initialize` timeout), so the next call gets `server_starting` or a result.
 - Session backstop 60s.
 - On timeout, SIGTERM the LSP request (if the server supports `$/cancelRequest`), return `TIMEOUT`. The server stays alive; subsequent calls reuse it.
 
@@ -388,6 +390,7 @@ interface LspClient {
     root: string;
     command: readonly string[];
     // Optional: initialization options, client capabilities overrides
+    signal?: AbortSignal; // bounds the caller's wait, not the server start
   }): Promise<ServerHandle>;
 
   hover(h: ServerHandle, path: string, pos: Position): Promise<HoverResult>;
@@ -404,7 +407,7 @@ interface LspClient {
 interface ServerHandle {
   readonly language: string;
   readonly root: string;
-  readonly state: "starting" | "ready" | "crashed";
+  readonly state: "starting" | "ready"; // never "crashed": ensureServer re-spawns or rejects
 }
 ```
 

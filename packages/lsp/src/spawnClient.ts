@@ -20,7 +20,7 @@ import type {
   SymbolInformation,
 } from "vscode-languageserver-protocol";
 import { DEFAULT_TIMEOUT_MS, LSP_SYMBOL_KIND_NAMES } from "./constants.js";
-import { LspServerExitedError } from "./errors.js";
+import { LspServerCrashedError, LspServerExitedError } from "./errors.js";
 import type {
   LspClient,
   LspHoverResult,
@@ -75,8 +75,15 @@ interface ServerEntry {
   readonly conn: MessageConnection;
   /** Resolves when the process has exited, or failed to spawn. */
   readonly exited: Promise<void>;
-  /** Fires once the process is gone, with the error to report for it. */
+  /**
+   * Fires once the server can no longer serve calls, with the error to
+   * report: the process is gone, or a pipe broke while it lives.
+   */
   readonly gone: GoneNotice;
+  /** The server's stderr tail, as text. */
+  readonly stderr: () => string;
+  /** The connection closed: one of the pipes ended. */
+  closed: boolean;
   /** Set once the server is taken out of service and being stopped. */
   stopping: Promise<void> | undefined;
   /** didOpen per path: in flight or done. A failed open is dropped and retried. */
@@ -150,7 +157,8 @@ export function createSpawnLspClient(
    * flight when the server dies rejects with LspServerExitedError, not with
    * a broken pipe and not by hanging until the caller's abort. When the
    * process lives but its stdin broke, it can never take another message:
-   * retire it, so the next call starts a new server.
+   * retire it with LspServerCrashedError, so this call reports the crash and
+   * the next call starts a new server.
    */
   function call<T>(entry: ServerEntry, send: () => Promise<T>): Promise<T> {
     const { gone, proc } = entry;
@@ -158,9 +166,25 @@ export function createSpawnLspClient(
     return new Promise<T>((resolve, reject) => {
       const unsubscribe = gone.subscribe(reject);
       const fail = (e: unknown): void => {
-        if (!isRunning(proc)) return; // The subscription rejects with the exit.
+        // In each early return the subscription rejects with the error to
+        // report once `gone` fires.
+        if (!isRunning(proc)) return;
+        if (proc.stdin?.destroyed) {
+          const { language } = entry.handle;
+          retire(
+            entry,
+            new LspServerCrashedError(
+              language,
+              `Language server for ${language} stopped reading its input (${messageOf(e)}).`,
+              entry.stderr(),
+              { cause: e },
+            ),
+          );
+          return;
+        }
+        // A closed connection gets its verdict from the onClose handler.
+        if (entry.closed) return;
         unsubscribe();
-        if (proc.stdin?.destroyed) retire(entry);
         reject(e);
       };
       try {
@@ -176,11 +200,13 @@ export function createSpawnLspClient(
 
   /**
    * Take a server out of service: mark it crashed, so the next call starts
-   * a new one, and stop its process. closeSession waits for the stop even
+   * a new one, and stop its process. With a reason, every call still waiting
+   * on it rejects with that reason. closeSession waits for the stop even
    * after a new server has replaced this one.
    */
-  function retire(entry: ServerEntry): void {
+  function retire(entry: ServerEntry, reason?: unknown): void {
     entry.state = "crashed";
+    if (reason !== undefined) entry.gone.fire(reason);
     if (entry.stopping) return;
     const stop = stopServer(entry);
     entry.stopping = stop;
@@ -192,12 +218,14 @@ export function createSpawnLspClient(
     language: string;
     root: string;
     profile: LspServerProfile;
+    signal?: AbortSignal;
   }): Promise<ServerHandle> {
     const k = key(args.language, args.root);
     const existing = servers.get(k);
     if (existing && existing.state !== "crashed") {
       return existing.handle;
     }
+    if (args.signal?.aborted) throw new Error("aborted");
 
     const [cmd, ...cmdArgs] = args.profile.command;
     if (!cmd) {
@@ -242,6 +270,8 @@ export function createSpawnLspClient(
       conn,
       exited,
       gone,
+      stderr: () => stderrTail.toString("utf8").trim(),
+      closed: false,
       stopping: undefined,
       openedFiles: new Map(),
       state: "starting",
@@ -273,10 +303,27 @@ export function createSpawnLspClient(
             args.language,
             code,
             signal,
-            stderrTail.toString("utf8").trim(),
+            entry.stderr(),
           ),
         ),
       );
+    });
+    // A pipe closed. A process that lives on can never answer again: give
+    // it one stop step to exit on its own, then retire it.
+    conn.onClose(() => {
+      entry.closed = true;
+      if (!isRunning(proc)) return;
+      void within(exited, STOP_STEP_MS).then((result) => {
+        if (result !== TIMED_OUT || !isRunning(proc)) return;
+        retire(
+          entry,
+          new LspServerCrashedError(
+            args.language,
+            `Language server for ${args.language} closed its output and stopped answering.`,
+            entry.stderr(),
+          ),
+        );
+      });
     });
 
     conn.listen();
@@ -304,38 +351,46 @@ export function createSpawnLspClient(
         : {}),
     };
 
-    try {
-      const init = await within(
-        call(entry, () =>
-          conn.sendRequest<InitializeResult>("initialize", initParams),
-        ),
-        initializeTimeoutMs,
-      );
-      if (init === TIMED_OUT) {
-        throw new Error(
-          `Language server for ${args.language} did not answer initialize within ${initializeTimeoutMs}ms. The next call starts it again.`,
+    const starting = (async (): Promise<ServerHandle> => {
+      try {
+        const init = await within(
+          call(entry, () =>
+            conn.sendRequest<InitializeResult>("initialize", initParams),
+          ),
+          initializeTimeoutMs,
         );
+        if (init === TIMED_OUT) {
+          throw new Error(
+            `Language server for ${args.language} did not answer initialize within ${initializeTimeoutMs}ms. The next call starts it again.`,
+          );
+        }
+        // Await the write: a server whose stdin broke here is not ready.
+        await call(entry, () => conn.sendNotification("initialized", {}));
+        // A server that exited right after the handshake is not ready either.
+        if (!isRunning(proc)) throw await gone.wait();
+        // We deliberately return a fresh handle rather than mutating the
+        // old one to keep the ServerHandle immutable from the caller's pov.
+        const readyHandle: ServerHandle = { ...handle, state: "ready" };
+        entry.handle = readyHandle;
+        entry.state = "ready";
+        return readyHandle;
+      } catch (e) {
+        retire(entry);
+        throw e;
       }
-      // Await the write: a server whose stdin broke here is not ready.
-      await call(entry, () => conn.sendNotification("initialized", {}));
-      // A server that exited right after the handshake is not ready either.
-      if (!isRunning(proc)) throw await gone.wait();
-      // We deliberately return a fresh handle rather than mutating the
-      // old one to keep the ServerHandle immutable from the caller's pov.
-      const readyHandle: ServerHandle = { ...handle, state: "ready" };
-      entry.handle = readyHandle;
-      entry.state = "ready";
-      return readyHandle;
-    } catch (e) {
-      retire(entry);
-      throw e;
-    }
+    })();
+    // An abort releases the caller only. The handshake goes on, bounded by
+    // initializeTimeoutMs, and the next call finds the server starting or
+    // ready. This handler keeps a failure nobody waits for handled.
+    starting.catch(() => {});
+    return args.signal ? withAbort(() => starting, args.signal) : starting;
   }
 
   async function requireReady(h: ServerHandle): Promise<ServerEntry> {
     const entry = servers.get(key(h.language, h.root));
-    // A server that died since the caller got its handle reports the exit.
-    if (entry?.state === "crashed" && !isRunning(entry.proc)) {
+    // A server that died, or lost a pipe, since the caller got its handle
+    // reports that.
+    if (entry && (entry.gone.fired || (entry.state === "crashed" && !isRunning(entry.proc)))) {
       throw await entry.gone.wait();
     }
     if (!entry || entry.state !== "ready") {
@@ -590,8 +645,8 @@ export function createSpawnLspClient(
 // ---- helpers ----
 
 /**
- * One-shot notice that the server process is gone, with the error to
- * report. Each send subscribes while in flight and unsubscribes when it
+ * One-shot notice that the server can no longer serve calls, with the
+ * error to report. Each send subscribes while in flight and unsubscribes when it
  * settles, so a long-lived server keeps no reference to finished requests.
  */
 class GoneNotice {
@@ -631,6 +686,10 @@ class GoneNotice {
   wait(): Promise<unknown> {
     return new Promise((resolve) => this.subscribe(resolve));
   }
+}
+
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** True while the process was spawned and has not exited yet. */

@@ -36,6 +36,9 @@
 //   close-stdin-on-hover       closes its stdin, then answers the first
 //                              `textDocument/hover` and stays alive until
 //                              signalled.
+//   close-stdout-on-hover      closes its stdout instead of answering
+//                              `textDocument/hover`, and stays alive until
+//                              signalled.
 //
 // Every mode appends the URI of each `textDocument/didOpen` it reads to
 // STATE_DIR/didopen.
@@ -59,7 +62,7 @@ const keepAlive = [
   "stop-reading-after-shutdown",
   "stubborn",
 ];
-if (mode.startsWith("close-stdin") || keepAlive.includes(mode)) {
+if (mode.startsWith("close-std") || keepAlive.includes(mode)) {
   setInterval(() => {}, 60_000);
 }
 if (mode === "stubborn") process.on("SIGTERM", () => {});
@@ -119,6 +122,12 @@ function handle(message) {
       if (mode === "silent-on-hover") return;
       if (mode === "die-on-hover") return die(1, "fake server: hover crashed\n");
       if (mode === "close-stdin-on-hover") closeStdin();
+      if (mode === "close-stdout-on-hover") {
+        // Same as stdin: libuv keeps fd 1 open through destroy().
+        process.stdout.destroy();
+        closeSync(1);
+        return;
+      }
       send({ id: message.id, result: { contents: "fake hover" } });
       return;
     case "shutdown":

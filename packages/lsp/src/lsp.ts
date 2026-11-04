@@ -10,7 +10,7 @@ import {
   SERVER_STARTUP_MAX_WAIT_MS,
   SESSION_BACKSTOP_MS,
 } from "./constants.js";
-import { LspServerExitedError } from "./errors.js";
+import { LspServerCrashedError } from "./errors.js";
 import { askPermission, fenceLsp, resolveOps, resolvePath } from "./fence.js";
 import {
   capHoverMarkdown,
@@ -159,46 +159,7 @@ export async function lsp(
   const lspRoot = resolvedPath
     ? await findLspRoot(resolvedPath, profile, session.cwd)
     : session.cwd;
-  let handle;
-  try {
-    handle = await session.client.ensureServer({
-      language: profile.language,
-      root: lspRoot,
-      profile,
-    });
-  } catch (e) {
-    return err(
-      toolError(
-        "SERVER_NOT_AVAILABLE",
-        `Failed to spawn ${profile.language} server: ${(e as Error).message}`,
-      ),
-    );
-  }
-
-  if (handle.state === "crashed") {
-    return err(
-      toolError(
-        "SERVER_CRASHED",
-        `Language server for ${profile.language} crashed. It will re-spawn on the next call.`,
-      ),
-    );
-  }
-
-  if (handle.state === "starting") {
-    const retryMs = computeRetryMs(session, profile.language);
-    return {
-      kind: "server_starting",
-      output: formatServerStarting({
-        operation: params.operation,
-        language: profile.language,
-        retryMs,
-      }),
-      language: profile.language,
-      retryMs,
-    };
-  }
-
-  // Happy path — dispatch
+  // One budget for the whole call, starting the server included.
   const timeoutMs =
     session.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const backstopMs =
@@ -206,91 +167,133 @@ export async function lsp(
   const effectiveTimeout = Math.min(timeoutMs, backstopMs);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), effectiveTimeout);
-  if (session.signal) {
-    if (session.signal.aborted) controller.abort();
-    else {
-      session.signal.addEventListener("abort", () => controller.abort(), {
-        once: true,
-      });
-    }
-  }
+  const onSessionAbort = (): void => controller.abort();
+  if (session.signal?.aborted) controller.abort();
+  else session.signal?.addEventListener("abort", onSessionAbort, { once: true });
 
   try {
-    switch (params.operation) {
-      case "hover":
-        return await runHover(
-          session.client,
-          handle,
-          resolvedPath!,
-          { line: params.line!, character: params.character! },
-          controller.signal,
-          session,
+    let handle;
+    try {
+      handle = await session.client.ensureServer({
+        language: profile.language,
+        root: lspRoot,
+        profile,
+        signal: controller.signal,
+      });
+    } catch (e) {
+      if (controller.signal.aborted) {
+        return err(
+          toolError(
+            "TIMEOUT",
+            `LSP ${params.operation} exceeded ${effectiveTimeout}ms while the ${profile.language} server was starting. Retry; the server keeps starting in the background.`,
+          ),
         );
-      case "definition":
-        return await runLocations(
-          "definition",
-          (c, h, p, pos, s) => c.definition(h, p, pos, s),
-          session.client,
-          handle,
-          resolvedPath!,
-          { line: params.line!, character: params.character! },
-          controller.signal,
-          session,
-        );
-      case "references":
-        return await runLocations(
-          "references",
-          (c, h, p, pos, s) => c.references(h, p, pos, s),
-          session.client,
-          handle,
-          resolvedPath!,
-          { line: params.line!, character: params.character! },
-          controller.signal,
-          session,
-        );
-      case "implementation":
-        return await runLocations(
-          "implementation",
-          (c, h, p, pos, s) => c.implementation(h, p, pos, s),
-          session.client,
-          handle,
-          resolvedPath!,
-          { line: params.line!, character: params.character! },
-          controller.signal,
-          session,
-        );
-      case "documentSymbol":
-        return await runDocumentSymbol(
-          session.client,
-          handle,
-          resolvedPath!,
-          controller.signal,
-        );
-      case "workspaceSymbol":
-        return await runWorkspaceSymbol(
-          session.client,
-          handle,
-          params.query!,
-          params.head_limit ?? DEFAULT_HEAD_LIMIT,
-          controller.signal,
-        );
-    }
-  } catch (e) {
-    if (controller.signal.aborted) {
+      }
       return err(
-        toolError("TIMEOUT", `LSP ${params.operation} exceeded ${effectiveTimeout}ms.`),
+        toolError(
+          "SERVER_NOT_AVAILABLE",
+          `Failed to spawn ${profile.language} server: ${(e as Error).message}`,
+        ),
       );
     }
-    if (e instanceof LspServerExitedError) {
-      return err(toolError("SERVER_CRASHED", e.message));
+
+    if (handle.state === "starting") {
+      const retryMs = computeRetryMs(session, profile.language);
+      return {
+        kind: "server_starting",
+        output: formatServerStarting({
+          operation: params.operation,
+          language: profile.language,
+          retryMs,
+        }),
+        language: profile.language,
+        retryMs,
+      };
     }
-    const msg = (e as Error).message;
-    if (/position/i.test(msg) && /invalid|out of range/i.test(msg)) {
-      return err(toolError("POSITION_INVALID", msg));
+
+    // Happy path: dispatch
+    try {
+      switch (params.operation) {
+        case "hover":
+          return await runHover(
+            session.client,
+            handle,
+            resolvedPath!,
+            { line: params.line!, character: params.character! },
+            controller.signal,
+            session,
+          );
+        case "definition":
+          return await runLocations(
+            "definition",
+            (c, h, p, pos, s) => c.definition(h, p, pos, s),
+            session.client,
+            handle,
+            resolvedPath!,
+            { line: params.line!, character: params.character! },
+            controller.signal,
+            session,
+          );
+        case "references":
+          return await runLocations(
+            "references",
+            (c, h, p, pos, s) => c.references(h, p, pos, s),
+            session.client,
+            handle,
+            resolvedPath!,
+            { line: params.line!, character: params.character! },
+            controller.signal,
+            session,
+          );
+        case "implementation":
+          return await runLocations(
+            "implementation",
+            (c, h, p, pos, s) => c.implementation(h, p, pos, s),
+            session.client,
+            handle,
+            resolvedPath!,
+            { line: params.line!, character: params.character! },
+            controller.signal,
+            session,
+          );
+        case "documentSymbol":
+          return await runDocumentSymbol(
+            session.client,
+            handle,
+            resolvedPath!,
+            controller.signal,
+          );
+        case "workspaceSymbol":
+          return await runWorkspaceSymbol(
+            session.client,
+            handle,
+            params.query!,
+            params.head_limit ?? DEFAULT_HEAD_LIMIT,
+            controller.signal,
+          );
+        default: {
+          const unknown: never = params.operation;
+          return err(toolError("INVALID_PARAM", `Unknown operation: ${String(unknown)}`));
+        }
+      }
+    } catch (e) {
+      if (controller.signal.aborted) {
+        return err(
+          toolError("TIMEOUT", `LSP ${params.operation} exceeded ${effectiveTimeout}ms.`),
+        );
+      }
+      if (e instanceof LspServerCrashedError) {
+        return err(toolError("SERVER_CRASHED", e.message));
+      }
+      const msg = (e as Error).message;
+      if (/position/i.test(msg) && /invalid|out of range/i.test(msg)) {
+        return err(toolError("POSITION_INVALID", msg));
+      }
+      return err(toolError("IO_ERROR", `LSP error: ${msg}`));
     }
-    return err(toolError("IO_ERROR", `LSP error: ${msg}`));
   } finally {
     clearTimeout(timer);
+    session.signal?.removeEventListener("abort", onSessionAbort);
   }
 }
 

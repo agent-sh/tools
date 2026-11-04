@@ -11,7 +11,7 @@ export {
   createSpawnLspClient,
   type SpawnLspClientOptions,
 } from "./spawnClient.js";
-export { LspServerExitedError } from "./errors.js";
+export { LspServerCrashedError, LspServerExitedError } from "./errors.js";
 export { StubLspClient } from "./stubClient.js";
 export {
   loadManifest,
