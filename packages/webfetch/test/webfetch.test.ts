@@ -18,19 +18,22 @@ function assertKind<T extends { kind: string }>(
   }
 }
 
-// Shared server + cleanup.
+// Shared server + cleanup. Each test starts from the default handler, so
+// one that relies on it does not depend on which test ran before it.
 let server: Awaited<ReturnType<typeof startServer>>;
-let handler: Handler = (req, res) => {
+const defaultHandler: Handler = (_req, res) => {
   res.statusCode = 200;
   res.setHeader("content-type", "text/plain");
   res.end("hello");
 };
+let handler: Handler = defaultHandler;
 
 async function setHandler(h: Handler): Promise<void> {
   handler = h;
 }
 
 beforeEach(async () => {
+  handler = defaultHandler;
   server = await startServer((req, res) => handler(req, res));
 });
 
