@@ -45,10 +45,21 @@ import type {
  * - Result normalization: LSP's ragged response shapes \u2192 our flat types.
  */
 
+/**
+ * Bound for each step of stopping a server: the `shutdown` reply, the exit
+ * after `exit`, and the exit after SIGTERM before SIGKILL. Design spec
+ * section 5.4 (agent-knowledge/design/lsp.md).
+ */
+const STOP_STEP_MS = 2_000;
+
+const TIMED_OUT = Symbol("timed out");
+
 interface ServerEntry {
   readonly handle: ServerHandle;
   readonly proc: ChildProcess;
   readonly conn: MessageConnection;
+  /** Resolves when the process has exited. */
+  readonly exited: Promise<void>;
   readonly openedFiles: Set<string>;
   state: "starting" | "ready" | "crashed";
 }
@@ -76,7 +87,9 @@ export function createSpawnLspClient(): LspClient {
     const text = await readFileText(filePath);
     const uri = pathToFileURL(filePath).toString();
     const languageId = entry.handle.language;
-    entry.conn.sendNotification("textDocument/didOpen", {
+    // Await the write: if the server's stdin broke, the caller's operation
+    // fails with that error instead of it going unhandled.
+    await entry.conn.sendNotification("textDocument/didOpen", {
       textDocument: {
         uri,
         languageId,
@@ -110,13 +123,18 @@ export function createSpawnLspClient(): LspClient {
       env: process.env,
     });
 
-    proc.on("error", () => {
+    // Only mark this process's own entry: a re-spawned server under the
+    // same key must not be marked crashed when an old process exits late.
+    const markCrashed = (): void => {
       const e = servers.get(k);
-      if (e) e.state = "crashed";
-    });
-    proc.on("exit", () => {
-      const e = servers.get(k);
-      if (e) e.state = "crashed";
+      if (e?.proc === proc) e.state = "crashed";
+    };
+    proc.on("error", markCrashed);
+    const exited = new Promise<void>((resolve) => {
+      proc.on("exit", () => {
+        markCrashed();
+        resolve();
+      });
     });
 
     const reader = new StreamMessageReader(proc.stdout!);
@@ -132,6 +150,7 @@ export function createSpawnLspClient(): LspClient {
       handle,
       proc,
       conn,
+      exited,
       openedFiles: new Set(),
       state: "starting",
     };
@@ -164,7 +183,8 @@ export function createSpawnLspClient(): LspClient {
 
     try {
       await conn.sendRequest<InitializeResult>("initialize", initParams);
-      conn.sendNotification("initialized", {});
+      // Await the write: a server whose stdin broke here is not ready.
+      await conn.sendNotification("initialized", {});
       entry.state = "ready";
       // We deliberately return a fresh handle rather than mutating the
       // old one to keep the ServerHandle immutable from the caller's pov.
@@ -351,21 +371,55 @@ export function createSpawnLspClient(): LspClient {
     }));
   }
 
-  async function closeSession(): Promise<void> {
-    for (const entry of servers.values()) {
-      try {
-        await entry.conn.sendRequest("shutdown");
-        entry.conn.sendNotification("exit");
-      } catch {
-        // best effort
-      }
-      try {
-        entry.proc.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
+  /**
+   * Send `shutdown` and `exit`. Resolves true once `exit` is written, false
+   * when the server cannot take it: it failed or did not answer `shutdown`
+   * in time, it exited, or its stdin broke. A write error here is expected
+   * (the server may be gone) and is handled, never left unhandled.
+   */
+  async function requestExit(entry: ServerEntry): Promise<boolean> {
+    try {
+      const reply = await within(
+        Promise.race([entry.conn.sendRequest("shutdown"), entry.exited]),
+        STOP_STEP_MS,
+      );
+      if (reply === TIMED_OUT || !isRunning(entry.proc)) return false;
+      await entry.conn.sendNotification("exit");
+      return true;
+    } catch {
+      return false;
     }
+  }
+
+  /**
+   * Stop one server: `shutdown` and `exit`, then SIGTERM, then SIGKILL,
+   * each step bounded by STOP_STEP_MS. No signal is sent before the `exit`
+   * write settles, so the write never races the process going away.
+   */
+  async function stopServer(entry: ServerEntry): Promise<void> {
+    const { proc, conn, exited } = entry;
+    try {
+      if (!isRunning(proc)) return;
+      if (
+        entry.state === "ready" &&
+        (await requestExit(entry)) &&
+        (await within(exited, STOP_STEP_MS)) !== TIMED_OUT
+      ) {
+        return;
+      }
+      if (!isRunning(proc)) return;
+      proc.kill("SIGTERM");
+      if ((await within(exited, STOP_STEP_MS)) !== TIMED_OUT) return;
+      proc.kill("SIGKILL");
+    } finally {
+      conn.dispose();
+    }
+  }
+
+  async function closeSession(): Promise<void> {
+    const entries = [...servers.values()];
     servers.clear();
+    await Promise.all(entries.map(stopServer));
   }
 
   return {
@@ -381,6 +435,32 @@ export function createSpawnLspClient(): LspClient {
 }
 
 // ---- helpers ----
+
+/** True while the process was spawned and has not exited yet. */
+function isRunning(proc: ChildProcess): boolean {
+  return (
+    proc.pid !== undefined && proc.exitCode === null && proc.signalCode === null
+  );
+}
+
+/**
+ * Settle with `promise`, or with TIMED_OUT after `ms`. The timer is cleared
+ * when `promise` settles first, so it never holds the event loop open.
+ */
+async function within<T>(
+  promise: Promise<T>,
+  ms: number,
+): Promise<T | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function fileUriToPath(uri: string): string {
   if (uri.startsWith("file://")) {

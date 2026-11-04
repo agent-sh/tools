@@ -309,7 +309,8 @@ The tool returns `server_starting` when (1) has happened but (2) hasn't. The cli
 
 ### 5.4 Shutdown
 
-- Session close → gracefully terminate all spawned servers (LSP `shutdown` → `exit`, then SIGTERM → SIGKILL after 2s).
+- Session close → gracefully terminate all spawned servers, in parallel. Each server: LSP `shutdown` (wait up to 2s for the reply) → `exit` → wait up to 2s for the process to exit → SIGTERM → SIGKILL after 2s. Skip `exit` when `shutdown` failed, timed out or the server already exited.
+- No signal is sent before the `exit` write settles, and every write is awaited. A server can exit or close its stdin at any point, so a write may fail with `EPIPE` or `ERR_STREAM_DESTROYED`. During shutdown that failure is expected and handled. In a live session it fails the operation that wrote, never as an unhandled rejection.
 - Harness crash → orphaned servers are the OS's problem; rust-analyzer leaks are a known ecosystem hazard.
 
 ### 5.5 Crash handling
