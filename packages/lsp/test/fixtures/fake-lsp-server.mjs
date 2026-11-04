@@ -23,6 +23,19 @@
 //   stop-reading-after-shutdown
 //                              stops reading its stdin, answers `shutdown`
 //                              200ms later, and stays alive until signalled.
+//   die-on-initialize          writes to stderr and exits with code 3
+//                              instead of answering `initialize`.
+//   silent-on-initialize       never answers `initialize`.
+//   flood-stderr-on-initialize writes FLOOD_BYTES to stderr, then answers
+//                              `initialize` once the write has drained.
+//   flood-stderr-then-die      writes FLOOD_BYTES and a last line to stderr,
+//                              then exits with code 1 instead of answering
+//                              `initialize`.
+//   die-on-hover               writes to stderr and exits with code 1
+//                              instead of answering `textDocument/hover`.
+//   close-stdin-on-hover       closes its stdin, then answers the first
+//                              `textDocument/hover` and stays alive until
+//                              signalled.
 //
 // Every mode appends the URI of each `textDocument/didOpen` it reads to
 // STATE_DIR/didopen.
@@ -32,6 +45,10 @@ import path from "node:path";
 
 const [mode = "well-behaved", stateDir] = process.argv.slice(2);
 if (!stateDir) throw new Error("usage: fake-lsp-server.mjs MODE STATE_DIR");
+
+// Larger than any pipe or socket buffer, so the write only completes if the
+// client keeps reading stderr.
+const FLOOD_BYTES = 2 * 1024 * 1024;
 
 writeFileSync(path.join(stateDir, "pid"), String(process.pid));
 
@@ -63,6 +80,16 @@ function send(message) {
   process.stdout.write(body);
 }
 
+function flood() {
+  const line = `${"x".repeat(99)}\n`;
+  return line.repeat(Math.ceil(FLOOD_BYTES / line.length));
+}
+
+// Exit only after the stderr write has drained, so the words are in the pipe.
+function die(code, words) {
+  process.stderr.write(words, () => process.exit(code));
+}
+
 function handle(message) {
   switch (message.method) {
     case "initialize":
@@ -70,7 +97,18 @@ function handle(message) {
         send({ id: message.id, error: { code: -32603, message: "fake server: refuses to start" } });
         return;
       }
+      if (mode === "die-on-initialize") return die(3, "fake server: cannot start\n");
+      if (mode === "silent-on-initialize") return;
+      if (mode === "flood-stderr-then-die") {
+        return die(1, `${flood()}fake server: last words\n`);
+      }
       if (mode === "close-stdin-on-initialize") closeStdin();
+      if (mode === "flood-stderr-on-initialize") {
+        process.stderr.write(flood(), () =>
+          send({ id: message.id, result: { capabilities: { hoverProvider: true } } }),
+        );
+        return;
+      }
       send({ id: message.id, result: { capabilities: { hoverProvider: true } } });
       if (mode === "stop-reading-after-initialize") process.stdin.pause();
       return;
@@ -79,6 +117,8 @@ function handle(message) {
       return;
     case "textDocument/hover":
       if (mode === "silent-on-hover") return;
+      if (mode === "die-on-hover") return die(1, "fake server: hover crashed\n");
+      if (mode === "close-stdin-on-hover") closeStdin();
       send({ id: message.id, result: { contents: "fake hover" } });
       return;
     case "shutdown":

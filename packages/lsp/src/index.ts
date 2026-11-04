@@ -7,7 +7,11 @@ export {
   safeParseLspParams,
   validatePerOp,
 } from "./schema.js";
-export { createSpawnLspClient } from "./spawnClient.js";
+export {
+  createSpawnLspClient,
+  type SpawnLspClientOptions,
+} from "./spawnClient.js";
+export { LspServerExitedError } from "./errors.js";
 export { StubLspClient } from "./stubClient.js";
 export {
   loadManifest,

@@ -19,7 +19,8 @@ import type {
   Position,
   SymbolInformation,
 } from "vscode-languageserver-protocol";
-import { LSP_SYMBOL_KIND_NAMES } from "./constants.js";
+import { DEFAULT_TIMEOUT_MS, LSP_SYMBOL_KIND_NAMES } from "./constants.js";
+import { LspServerExitedError } from "./errors.js";
 import type {
   LspClient,
   LspHoverResult,
@@ -52,21 +53,44 @@ import type {
  */
 const STOP_STEP_MS = 2_000;
 
+/**
+ * Bytes of server stderr kept for the exit error. Enough for a typical
+ * Node stack trace or Rust panic message; the rest is read and dropped.
+ */
+const STDERR_TAIL_BYTES = 4_096;
+
 const TIMED_OUT = Symbol("timed out");
 
+export interface SpawnLspClientOptions {
+  /**
+   * Bound for the `initialize` handshake, in ms. Defaults to
+   * DEFAULT_TIMEOUT_MS, the per-operation timeout (design spec section 8).
+   */
+  readonly initializeTimeoutMs?: number;
+}
+
 interface ServerEntry {
-  readonly handle: ServerHandle;
+  handle: ServerHandle;
   readonly proc: ChildProcess;
   readonly conn: MessageConnection;
-  /** Resolves when the process has exited. */
+  /** Resolves when the process has exited, or failed to spawn. */
   readonly exited: Promise<void>;
+  /** Fires once the process is gone, with the error to report for it. */
+  readonly gone: GoneNotice;
+  /** Set once the server is taken out of service and being stopped. */
+  stopping: Promise<void> | undefined;
   /** didOpen per path: in flight or done. A failed open is dropped and retried. */
   readonly openedFiles: Map<string, Promise<void>>;
   state: "starting" | "ready" | "crashed";
 }
 
-export function createSpawnLspClient(): LspClient {
+export function createSpawnLspClient(
+  options: SpawnLspClientOptions = {},
+): LspClient {
+  const initializeTimeoutMs = options.initializeTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const servers = new Map<string, ServerEntry>();
+  /** Stops of retired servers, which may no longer be in `servers`. */
+  const stops = new Set<Promise<void>>();
 
   function key(language: string, root: string): string {
     return `${language}|${root}`;
@@ -98,14 +122,16 @@ export function createSpawnLspClient(): LspClient {
       const languageId = entry.handle.language;
       // Await the write: if the server's stdin broke, the caller's
       // operation fails with that error instead of it going unhandled.
-      await entry.conn.sendNotification("textDocument/didOpen", {
-        textDocument: {
-          uri,
-          languageId,
-          version: 1,
-          text,
-        },
-      });
+      await call(entry, () =>
+        entry.conn.sendNotification("textDocument/didOpen", {
+          textDocument: {
+            uri,
+            languageId,
+            version: 1,
+            text,
+          },
+        }),
+      );
     })();
     entry.openedFiles.set(filePath, opening);
     // A failed open is retried by the next call. This handler also keeps
@@ -116,6 +142,50 @@ export function createSpawnLspClient(): LspClient {
       }
     });
     return opening;
+  }
+
+  /**
+   * Run one send against the server. When the process is gone by the time
+   * the send settles or fails, report the exit instead: a request still in
+   * flight when the server dies rejects with LspServerExitedError, not with
+   * a broken pipe and not by hanging until the caller's abort. When the
+   * process lives but its stdin broke, it can never take another message:
+   * retire it, so the next call starts a new server.
+   */
+  function call<T>(entry: ServerEntry, send: () => Promise<T>): Promise<T> {
+    const { gone, proc } = entry;
+    if (gone.fired) return Promise.reject(gone.reason);
+    return new Promise<T>((resolve, reject) => {
+      const unsubscribe = gone.subscribe(reject);
+      const fail = (e: unknown): void => {
+        if (!isRunning(proc)) return; // The subscription rejects with the exit.
+        unsubscribe();
+        if (proc.stdin?.destroyed) retire(entry);
+        reject(e);
+      };
+      try {
+        send().then((value) => {
+          unsubscribe();
+          resolve(value);
+        }, fail);
+      } catch (e) {
+        fail(e);
+      }
+    });
+  }
+
+  /**
+   * Take a server out of service: mark it crashed, so the next call starts
+   * a new one, and stop its process. closeSession waits for the stop even
+   * after a new server has replaced this one.
+   */
+  function retire(entry: ServerEntry): void {
+    entry.state = "crashed";
+    if (entry.stopping) return;
+    const stop = stopServer(entry);
+    entry.stopping = stop;
+    stops.add(stop);
+    void stop.then(() => stops.delete(stop));
   }
 
   async function ensureServer(args: {
@@ -141,23 +211,25 @@ export function createSpawnLspClient(): LspClient {
       env: process.env,
     });
 
-    // Only mark this process's own entry: a re-spawned server under the
-    // same key must not be marked crashed when an old process exits late.
-    const markCrashed = (): void => {
-      const e = servers.get(k);
-      if (e?.proc === proc) e.state = "crashed";
-    };
-    proc.on("error", markCrashed);
-    const exited = new Promise<void>((resolve) => {
-      proc.on("exit", () => {
-        markCrashed();
-        resolve();
-      });
+    // Drain stderr: once the pipe fills, a server that keeps writing to it
+    // blocks. Keep only a bounded tail, for the exit error.
+    let stderrTail: Buffer = Buffer.alloc(0);
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      stderrTail = appendTail(stderrTail, chunk, STDERR_TAIL_BYTES);
+    });
+    proc.stderr?.on("error", () => {
+      // Losing diagnostics must not crash the host.
     });
 
     const reader = new StreamMessageReader(proc.stdout!);
     const writer = new StreamMessageWriter(proc.stdin!);
     const conn = createMessageConnection(reader, writer);
+
+    let resolveExited!: () => void;
+    const exited = new Promise<void>((resolve) => {
+      resolveExited = resolve;
+    });
+    const gone = new GoneNotice();
 
     const handle: ServerHandle = {
       language: args.language,
@@ -169,10 +241,43 @@ export function createSpawnLspClient(): LspClient {
       proc,
       conn,
       exited,
+      gone,
+      stopping: undefined,
       openedFiles: new Map(),
       state: "starting",
     };
     servers.set(k, entry);
+
+    // Handlers touch only their own entry: a re-spawned server under the
+    // same key is a different entry and stays untouched by an old exit.
+    const markGone = (reason: unknown): void => {
+      entry.state = "crashed";
+      resolveExited();
+      gone.fire(reason);
+      // Rejects whatever the connection still holds; no write can follow.
+      conn.dispose();
+    };
+    proc.on("error", (e) => {
+      // A failed spawn has no pid and emits no 'exit'.
+      if (proc.pid === undefined) markGone(e);
+      else entry.state = "crashed";
+    });
+    proc.on("exit", (code, signal) => {
+      entry.state = "crashed";
+      resolveExited();
+      // One more turn lets stderr that is already in the pipe arrive, so
+      // the error carries the server's last words.
+      setImmediate(() =>
+        markGone(
+          new LspServerExitedError(
+            args.language,
+            code,
+            signal,
+            stderrTail.toString("utf8").trim(),
+          ),
+        ),
+      );
+    });
 
     conn.listen();
 
@@ -200,24 +305,39 @@ export function createSpawnLspClient(): LspClient {
     };
 
     try {
-      await conn.sendRequest<InitializeResult>("initialize", initParams);
+      const init = await within(
+        call(entry, () =>
+          conn.sendRequest<InitializeResult>("initialize", initParams),
+        ),
+        initializeTimeoutMs,
+      );
+      if (init === TIMED_OUT) {
+        throw new Error(
+          `Language server for ${args.language} did not answer initialize within ${initializeTimeoutMs}ms. The next call starts it again.`,
+        );
+      }
       // Await the write: a server whose stdin broke here is not ready.
-      await conn.sendNotification("initialized", {});
-      entry.state = "ready";
+      await call(entry, () => conn.sendNotification("initialized", {}));
+      // A server that exited right after the handshake is not ready either.
+      if (!isRunning(proc)) throw await gone.wait();
       // We deliberately return a fresh handle rather than mutating the
       // old one to keep the ServerHandle immutable from the caller's pov.
       const readyHandle: ServerHandle = { ...handle, state: "ready" };
-      servers.set(k, { ...entry, handle: readyHandle, state: "ready" });
+      entry.handle = readyHandle;
+      entry.state = "ready";
       return readyHandle;
     } catch (e) {
-      entry.state = "crashed";
-      proc.kill("SIGTERM");
+      retire(entry);
       throw e;
     }
   }
 
-  function requireReady(h: ServerHandle): ServerEntry {
+  async function requireReady(h: ServerHandle): Promise<ServerEntry> {
     const entry = servers.get(key(h.language, h.root));
+    // A server that died since the caller got its handle reports the exit.
+    if (entry?.state === "crashed" && !isRunning(entry.proc)) {
+      throw await entry.gone.wait();
+    }
     if (!entry || entry.state !== "ready") {
       throw new Error(
         `Server for ${h.language} at ${h.root} is not ready (state=${entry?.state ?? "missing"})`,
@@ -248,14 +368,17 @@ export function createSpawnLspClient(): LspClient {
     pos: Position1,
     signal: AbortSignal,
   ): Promise<LspHoverResult | null> {
-    const entry = requireReady(h);
+    const entry = await requireReady(h);
     await withAbort(() => didOpenIfNeeded(entry, filePath), signal);
     const uri = pathToFileURL(filePath).toString();
     const result = await withAbort<Hover | null>(
-      () => entry.conn.sendRequest("textDocument/hover", {
-        textDocument: { uri },
-        position: toLspPosition(pos),
-      }),
+      () =>
+        call(entry, () =>
+          entry.conn.sendRequest("textDocument/hover", {
+            textDocument: { uri },
+            position: toLspPosition(pos),
+          }),
+        ),
       signal,
     );
     if (!result || !result.contents) return null;
@@ -271,7 +394,7 @@ export function createSpawnLspClient(): LspClient {
     pos: Position1,
     signal: AbortSignal,
   ): Promise<readonly LspLocation[]> {
-    const entry = requireReady(h);
+    const entry = await requireReady(h);
     await withAbort(() => didOpenIfNeeded(entry, filePath), signal);
     const uri = pathToFileURL(filePath).toString();
     const body: Record<string, unknown> = {
@@ -282,7 +405,7 @@ export function createSpawnLspClient(): LspClient {
       body.context = { includeDeclaration: true };
     }
     const result = await withAbort<Location[] | LocationLink[] | null>(
-      () => entry.conn.sendRequest(method, body),
+      () => call(entry, () => entry.conn.sendRequest(method, body)),
       signal,
     );
     if (!result) return [];
@@ -323,15 +446,18 @@ export function createSpawnLspClient(): LspClient {
     filePath: string,
     signal: AbortSignal,
   ): Promise<readonly LspSymbolInfo[]> {
-    const entry = requireReady(h);
+    const entry = await requireReady(h);
     await withAbort(() => didOpenIfNeeded(entry, filePath), signal);
     const uri = pathToFileURL(filePath).toString();
     const result = await withAbort<
       DocumentSymbol[] | SymbolInformation[] | null
     >(
-      () => entry.conn.sendRequest("textDocument/documentSymbol", {
-        textDocument: { uri },
-      }),
+      () =>
+        call(entry, () =>
+          entry.conn.sendRequest("textDocument/documentSymbol", {
+            textDocument: { uri },
+          }),
+        ),
       signal,
     );
     if (!result || result.length === 0) return [];
@@ -371,9 +497,10 @@ export function createSpawnLspClient(): LspClient {
     query: string,
     signal: AbortSignal,
   ): Promise<readonly LspSymbolInfo[]> {
-    const entry = requireReady(h);
+    const entry = await requireReady(h);
     const result = await withAbort<SymbolInformation[] | null>(
-      () => entry.conn.sendRequest("workspace/symbol", { query }),
+      () =>
+        call(entry, () => entry.conn.sendRequest("workspace/symbol", { query })),
       signal,
     );
     if (!result) return [];
@@ -442,7 +569,10 @@ export function createSpawnLspClient(): LspClient {
   async function closeSession(): Promise<void> {
     const entries = [...servers.values()];
     servers.clear();
-    await Promise.all(entries.map(stopServer));
+    await Promise.all([
+      ...entries.map((e) => e.stopping ?? stopServer(e)),
+      ...stops,
+    ]);
   }
 
   return {
@@ -458,6 +588,50 @@ export function createSpawnLspClient(): LspClient {
 }
 
 // ---- helpers ----
+
+/**
+ * One-shot notice that the server process is gone, with the error to
+ * report. Each send subscribes while in flight and unsubscribes when it
+ * settles, so a long-lived server keeps no reference to finished requests.
+ */
+class GoneNotice {
+  private done = false;
+  private why: unknown;
+  private readonly waiters = new Set<(reason: unknown) => void>();
+
+  get fired(): boolean {
+    return this.done;
+  }
+
+  get reason(): unknown {
+    return this.why;
+  }
+
+  fire(reason: unknown): void {
+    if (this.done) return;
+    this.done = true;
+    this.why = reason;
+    for (const waiter of this.waiters) waiter(reason);
+    this.waiters.clear();
+  }
+
+  /** Call `waiter` once fired, at once if already fired. Returns an unsubscribe. */
+  subscribe(waiter: (reason: unknown) => void): () => void {
+    if (this.done) {
+      waiter(this.why);
+      return () => {};
+    }
+    this.waiters.add(waiter);
+    return () => {
+      this.waiters.delete(waiter);
+    };
+  }
+
+  /** Resolves with the reason. Await it only once the process is known gone. */
+  wait(): Promise<unknown> {
+    return new Promise((resolve) => this.subscribe(resolve));
+  }
+}
 
 /** True while the process was spawned and has not exited yet. */
 function isRunning(proc: ChildProcess): boolean {
@@ -483,6 +657,15 @@ async function within<T>(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The last `limit` bytes of `tail` followed by `chunk`, in a fresh buffer. */
+function appendTail(tail: Buffer, chunk: Buffer, limit: number): Buffer {
+  if (chunk.length >= limit) {
+    return Buffer.from(chunk.subarray(chunk.length - limit));
+  }
+  const keep = Math.min(tail.length, limit - chunk.length);
+  return Buffer.concat([tail.subarray(tail.length - keep), chunk]);
 }
 
 function fileUriToPath(uri: string): string {

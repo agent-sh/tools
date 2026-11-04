@@ -2,9 +2,10 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { lsp } from "../src/lsp.js";
 import { createSpawnLspClient } from "../src/spawnClient.js";
 import type { LspServerProfile } from "../src/types.js";
-import { makeTempDir, write } from "./helpers.js";
+import { makeSession, makeTempDir, write } from "./helpers.js";
 
 const FAKE_SERVER = fileURLToPath(
   new URL("./fixtures/fake-lsp-server.mjs", import.meta.url),
@@ -19,7 +20,17 @@ type FakeMode =
   | "silent-on-hover"
   | "stop-reading-after-initialize"
   | "stubborn"
-  | "stop-reading-after-shutdown";
+  | "stop-reading-after-shutdown"
+  | "die-on-initialize"
+  | "silent-on-initialize"
+  | "flood-stderr-on-initialize"
+  | "flood-stderr-then-die"
+  | "die-on-hover"
+  | "close-stdin-on-hover";
+
+// Cases that hung before their fix get a short limit, so a regression fails
+// fast instead of at the 30s default.
+const HANG_LIMIT_MS = 10_000;
 
 function fakeProfile(mode: FakeMode, stateDir: string): LspServerProfile {
   return {
@@ -188,6 +199,95 @@ describe("spawn client: live session", () => {
     expect(unhandled).toEqual([]);
     expect(aliveAfterClose).toBe(false);
   });
+
+  it("rejects an in-flight request with a server-exited error, then re-spawns", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    try {
+      const handle = await client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("die-on-hover", root),
+      });
+      const firstPid = serverPid(root);
+      // The abort would end a hang after 5s; the exit must win well before.
+      await expect(
+        client.hover(handle, file, { line: 1, character: 1 }, AbortSignal.timeout(5_000)),
+      ).rejects.toMatchObject({
+        name: "LspServerExitedError",
+        exitCode: 1,
+        message: expect.stringContaining("fake server: hover crashed"),
+      });
+
+      const again = await client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("die-on-hover", root),
+      });
+      expect(again.state).toBe("ready");
+      expect(serverPid(root)).not.toBe(firstPid);
+    } finally {
+      await client.closeSession();
+    }
+    await settle();
+    expect(unhandled).toEqual([]);
+  }, HANG_LIMIT_MS);
+
+  it("returns SERVER_CRASHED from the tool for the call that saw the exit", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    const session = makeSession(root, client, {
+      manifest: { servers: { fake: fakeProfile("die-on-hover", root) } },
+      defaultTimeoutMs: 5_000,
+    });
+    try {
+      const r = await lsp({ operation: "hover", path: file, line: 1, character: 1 }, session);
+      expect(r).toMatchObject({
+        kind: "error",
+        error: {
+          code: "SERVER_CRASHED",
+          message: expect.stringContaining("fake server: hover crashed"),
+        },
+      });
+    } finally {
+      await client.closeSession();
+    }
+  }, HANG_LIMIT_MS);
+
+  it("re-spawns a server whose stdin broke after startup", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    let firstPid = 0;
+    try {
+      const handle = await client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("close-stdin-on-hover", root),
+      });
+      firstPid = serverPid(root);
+      // The server closes its stdin before it answers this hover.
+      await client.hover(handle, file, POS, AbortSignal.timeout(5_000));
+      await expect(
+        client.hover(handle, file, POS, AbortSignal.timeout(5_000)),
+      ).rejects.toThrow(/EPIPE/);
+
+      const again = await client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("close-stdin-on-hover", root),
+      });
+      expect(again.state).toBe("ready");
+      expect(serverPid(root)).not.toBe(firstPid);
+    } finally {
+      await client.closeSession();
+    }
+    // closeSession also waits for the retired server.
+    const firstAliveAfterClose = isAlive(firstPid);
+    await settle();
+
+    expect(unhandled).toEqual([]);
+    expect(firstAliveAfterClose).toBe(false);
+  }, HANG_LIMIT_MS);
 });
 
 describe("spawn client: operations", () => {
@@ -293,4 +393,105 @@ describe("spawn client: operations", () => {
       await client.closeSession();
     }
   });
+});
+
+describe("spawn client: startup", () => {
+  it("rejects ensureServer when the server exits during initialize", async () => {
+    const client = createSpawnLspClient();
+    try {
+      await expect(
+        client.ensureServer({
+          language: "fake",
+          root,
+          profile: fakeProfile("die-on-initialize", root),
+        }),
+      ).rejects.toMatchObject({
+        name: "LspServerExitedError",
+        exitCode: 3,
+        message: expect.stringContaining("fake server: cannot start"),
+      });
+    } finally {
+      await client.closeSession();
+    }
+    await settle();
+    expect(unhandled).toEqual([]);
+  }, HANG_LIMIT_MS);
+
+  it("rejects ensureServer and stops the server when initialize gets no answer in time", async () => {
+    const client = createSpawnLspClient({ initializeTimeoutMs: 300 });
+    try {
+      await expect(
+        client.ensureServer({
+          language: "fake",
+          root,
+          profile: fakeProfile("silent-on-initialize", root),
+        }),
+      ).rejects.toThrow(/did not answer initialize within 300ms/);
+    } finally {
+      await client.closeSession();
+    }
+    const aliveAfterClose = isAlive(serverPid(root));
+    await settle();
+
+    expect(unhandled).toEqual([]);
+    expect(aliveAfterClose).toBe(false);
+  }, HANG_LIMIT_MS);
+
+  it("reports a missing server binary as the spawn error", async () => {
+    const client = createSpawnLspClient();
+    const missing = path.join(root, "no-such-server");
+    try {
+      await expect(
+        client.ensureServer({
+          language: "fake",
+          root,
+          profile: { language: "fake", extensions: [".fake"], command: [missing] },
+        }),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await client.closeSession();
+    }
+    await settle();
+    expect(unhandled).toEqual([]);
+  }, HANG_LIMIT_MS);
+});
+
+describe("spawn client: stderr", () => {
+  it("drains stderr, so a server that writes a lot of it still starts", async () => {
+    const client = createSpawnLspClient();
+    try {
+      const handle = await client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("flood-stderr-on-initialize", root),
+      });
+      expect(handle.state).toBe("ready");
+    } finally {
+      await client.closeSession();
+    }
+  }, HANG_LIMIT_MS);
+
+  it("keeps only a bounded stderr tail for the exit error", async () => {
+    const client = createSpawnLspClient();
+    let error: unknown;
+    try {
+      await client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("flood-stderr-then-die", root),
+      });
+    } catch (e) {
+      error = e;
+    } finally {
+      await client.closeSession();
+    }
+    expect(error).toMatchObject({
+      name: "LspServerExitedError",
+      exitCode: 1,
+      message: expect.stringContaining("fake server: last words"),
+    });
+    const tail = (error as { stderrTail: string }).stderrTail;
+    expect(tail.endsWith("fake server: last words")).toBe(true);
+    expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(4_096);
+  }, HANG_LIMIT_MS);
 });

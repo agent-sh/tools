@@ -10,6 +10,7 @@ import {
   SERVER_STARTUP_MAX_WAIT_MS,
   SESSION_BACKSTOP_MS,
 } from "./constants.js";
+import { LspServerExitedError } from "./errors.js";
 import { askPermission, fenceLsp, resolveOps, resolvePath } from "./fence.js";
 import {
   capHoverMarkdown,
@@ -279,6 +280,9 @@ export async function lsp(
       return err(
         toolError("TIMEOUT", `LSP ${params.operation} exceeded ${effectiveTimeout}ms.`),
       );
+    }
+    if (e instanceof LspServerExitedError) {
+      return err(toolError("SERVER_CRASHED", e.message));
     }
     const msg = (e as Error).message;
     if (/position/i.test(msg) && /invalid|out of range/i.test(msg)) {

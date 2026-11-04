@@ -307,6 +307,8 @@ The tool returns `server_starting` when (1) has happened but (2) hasn't. The cli
 - **Simple op (documentSymbol on a tiny file)** — usually works before indexing completes. Try it; fall back to `server_starting` if the server rejects.
 - **Full-index op (references, workspaceSymbol)** — block up to `SERVER_STARTUP_MAX_WAIT_MS` for indexing, then return `server_starting` with `retry_ms`.
 
+The handshake itself is bounded. `initialize` gets the per-operation timeout (`DEFAULT_TIMEOUT_MS`, section 8); the spawn client takes `initializeTimeoutMs` to override it. When the bound passes, or the process exits or fails to spawn first, `ensureServer` rejects at once, the client stops the server (SIGTERM, then SIGKILL after 2s), and the tool returns `SERVER_NOT_AVAILABLE` with the reason. The next call starts a new server.
+
 ### 5.4 Shutdown
 
 - Session close → gracefully terminate all spawned servers, in parallel. Each server: LSP `shutdown` (wait up to 2s for the reply) → `exit` (wait up to 2s for the write) → wait up to 2s for the process to exit → SIGTERM → SIGKILL after 2s → wait up to 2s for the exit. Skip `exit` when `shutdown` failed, timed out or the server already exited. A server that is not ready (still starting, or crashed) skips `shutdown` and `exit` and goes straight to SIGTERM. `closeSession` returns once every server has exited, or 2s after its SIGKILL.
@@ -316,6 +318,9 @@ The tool returns `server_starting` when (1) has happened but (2) hasn't. The cli
 ### 5.5 Crash handling
 
 - If the server exits unexpectedly, the next operation gets `SERVER_CRASHED` and the tool transparently re-spawns on the call AFTER that.
+- A request in flight when the process exits rejects at once with `LspServerExitedError` (exit code or signal, plus the server's last stderr output). It does not wait for the per-op timeout. The tool returns it as `SERVER_CRASHED` for that call.
+- The client always drains the server's stderr, so a server that writes a lot of it never blocks on a full pipe. Only the last 4 KB is kept, for that error.
+- A server whose stdin breaks while the process lives can never take another message. The write that found it fails that call, and the client marks the server crashed and stops it, so the next call starts a new one.
 - Deliberately don't auto-retry within the same call: the model gets to see the crash, decide whether the request was the cause (malformed position, etc.), and retry or not.
 
 ---
