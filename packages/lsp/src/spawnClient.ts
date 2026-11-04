@@ -392,7 +392,7 @@ export function createSpawnLspClient(): LspClient {
   /**
    * Send `shutdown` and `exit`. Resolves true once `exit` is written, false
    * when the server cannot take it: it failed or did not answer `shutdown`
-   * in time, it exited, or its stdin broke. A write error here is expected
+   * in time, it exited, its stdin broke, or `exit` was not written in time. A write error here is expected
    * (the server may be gone) and is handled, never left unhandled.
    */
   async function requestExit(entry: ServerEntry): Promise<boolean> {
@@ -402,8 +402,10 @@ export function createSpawnLspClient(): LspClient {
         STOP_STEP_MS,
       );
       if (reply === TIMED_OUT || !isRunning(entry.proc)) return false;
-      await entry.conn.sendNotification("exit");
-      return true;
+      // Bounded too: a write queued ahead (an abandoned didOpen, say) can
+      // hold `exit` behind it when the server stops reading stdin.
+      const sent = await within(entry.conn.sendNotification("exit"), STOP_STEP_MS);
+      return sent !== TIMED_OUT;
     } catch {
       return false;
     }

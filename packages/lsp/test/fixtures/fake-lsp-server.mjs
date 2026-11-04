@@ -20,6 +20,9 @@
 //                              stdin and stays alive until signalled.
 //   stubborn                   answers `shutdown`, ignores `exit` and
 //                              SIGTERM; only SIGKILL stops it.
+//   stop-reading-after-shutdown
+//                              stops reading its stdin, answers `shutdown`
+//                              200ms later, and stays alive until signalled.
 //
 // Every mode appends the URI of each `textDocument/didOpen` it reads to
 // STATE_DIR/didopen.
@@ -34,7 +37,11 @@ writeFileSync(path.join(stateDir, "pid"), String(process.pid));
 
 // A server that closed its input has nothing left keeping it alive.
 // Hold it open so the client has to stop it.
-const keepAlive = ["stop-reading-after-initialize", "stubborn"];
+const keepAlive = [
+  "stop-reading-after-initialize",
+  "stop-reading-after-shutdown",
+  "stubborn",
+];
 if (mode.startsWith("close-stdin") || keepAlive.includes(mode)) {
   setInterval(() => {}, 60_000);
 }
@@ -77,6 +84,12 @@ function handle(message) {
     case "shutdown":
       if (mode === "die-on-shutdown") process.exit(0);
       if (mode === "close-stdin-on-shutdown") closeStdin();
+      if (mode === "stop-reading-after-shutdown") {
+        process.stdin.pause();
+        // Give the client time to queue more writes before `exit`.
+        setTimeout(() => send({ id: message.id, result: null }), 200);
+        return;
+      }
       send({ id: message.id, result: null });
       return;
     case "exit":

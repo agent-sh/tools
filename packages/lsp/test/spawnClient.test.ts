@@ -18,7 +18,8 @@ type FakeMode =
   | "reject-initialize-slow-exit"
   | "silent-on-hover"
   | "stop-reading-after-initialize"
-  | "stubborn";
+  | "stubborn"
+  | "stop-reading-after-shutdown";
 
 function fakeProfile(mode: FakeMode, stateDir: string): LspServerProfile {
   return {
@@ -123,6 +124,31 @@ describe("spawn client: closeSession", () => {
     expect(unhandled).toEqual([]);
     expect(aliveAfterClose).toBe(false);
   });
+
+  it("bounds the exit write when an abandoned file open fills the pipe", async () => {
+    const client = createSpawnLspClient();
+    // Larger than any pipe or socket buffer, so the write cannot complete.
+    const file = write(root, "big.fake", "x".repeat(4 * 1024 * 1024));
+    const handle = await client.ensureServer({
+      language: "fake",
+      root,
+      profile: fakeProfile("stop-reading-after-shutdown", root),
+    });
+    const pid = serverPid(root);
+    // Abort while the file is still being read: the open goes on alone and
+    // queues its write behind `shutdown`, ahead of `exit`.
+    const controller = new AbortController();
+    const op = client.hover(handle, file, POS, controller.signal);
+    controller.abort();
+    await expect(op).rejects.toThrow("aborted");
+
+    await client.closeSession();
+    const aliveAfterClose = isAlive(pid);
+    await settle();
+
+    expect(unhandled).toEqual([]);
+    expect(aliveAfterClose).toBe(false);
+  }, 10_000);
 
   it("returns only after a server that needs SIGKILL is gone", async () => {
     const client = createSpawnLspClient();
