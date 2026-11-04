@@ -167,16 +167,6 @@ pub async fn lsp(input: Value, session: &LspSessionConfig) -> LspResult {
         }
     };
 
-    if handle.state == ServerState::Crashed {
-        return err(ToolError::new(
-            ToolErrorCode::ServerCrashed,
-            format!(
-                "Language server for {} crashed. It will re-spawn on the next call.",
-                profile.language
-            ),
-        ));
-    }
-
     if handle.state == ServerState::Starting {
         let retry_ms = compute_retry_ms(session, &profile.language).await;
         return LspResult::ServerStarting(LspServerStarting {

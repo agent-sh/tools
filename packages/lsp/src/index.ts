@@ -35,6 +35,7 @@ export {
   // in all packages. Callers that need the lsp-scoped default can import
   // from ./constants.js directly. Same treatment as glob and webfetch.
   SERVER_STARTUP_MAX_WAIT_MS,
+  DEFAULT_INITIALIZE_TIMEOUT_MS,
   MAX_HOVER_MARKDOWN_BYTES,
   MAX_PREVIEW_LINE_LENGTH,
   SERVER_STARTING_RETRY_BASE_MS,

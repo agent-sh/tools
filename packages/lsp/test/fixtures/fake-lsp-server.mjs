@@ -26,6 +26,8 @@
 //   die-on-initialize          writes to stderr and exits with code 3
 //                              instead of answering `initialize`.
 //   silent-on-initialize       never answers `initialize`.
+//   slow-initialize            answers `initialize` after 800ms, or after
+//                              FAKE_INITIALIZE_DELAY_MS when that is set.
 //   flood-stderr-on-initialize writes FLOOD_BYTES to stderr, then answers
 //                              `initialize` once the write has drained.
 //   flood-stderr-then-die      writes FLOOD_BYTES and a last line to stderr,
@@ -40,8 +42,8 @@
 //                              `textDocument/hover`, and stays alive until
 //                              signalled.
 //
-// Every mode appends the URI of each `textDocument/didOpen` it reads to
-// STATE_DIR/didopen.
+// Every mode appends its pid to STATE_DIR/spawns at startup, and the URI of
+// each `textDocument/didOpen` it reads to STATE_DIR/didopen.
 
 import { appendFileSync, closeSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -54,6 +56,7 @@ if (!stateDir) throw new Error("usage: fake-lsp-server.mjs MODE STATE_DIR");
 const FLOOD_BYTES = 2 * 1024 * 1024;
 
 writeFileSync(path.join(stateDir, "pid"), String(process.pid));
+appendFileSync(path.join(stateDir, "spawns"), `${process.pid}\n`);
 
 // A server that closed its input has nothing left keeping it alive.
 // Hold it open so the client has to stop it.
@@ -102,6 +105,11 @@ function handle(message) {
       }
       if (mode === "die-on-initialize") return die(3, "fake server: cannot start\n");
       if (mode === "silent-on-initialize") return;
+      if (mode === "slow-initialize") {
+        const delay = Number(process.env.FAKE_INITIALIZE_DELAY_MS ?? 800);
+        setTimeout(() => send({ id: message.id, result: { capabilities: { hoverProvider: true } } }), delay);
+        return;
+      }
       if (mode === "flood-stderr-then-die") {
         return die(1, `${flood()}fake server: last words\n`);
       }

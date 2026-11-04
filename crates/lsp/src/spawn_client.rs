@@ -384,10 +384,7 @@ impl LspClient for SpawnLspClient {
         {
             let servers = self.servers.lock().await;
             if let Some(entry) = servers.get(&key) {
-                let st = *entry.state.lock().await;
-                if st != ServerState::Crashed {
-                    return Ok(entry.handle().await);
-                }
+                return Ok(entry.handle().await);
             }
         }
 

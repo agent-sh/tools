@@ -51,12 +51,13 @@ pub struct LspManifest {
     pub servers: HashMap<String, LspServerProfile>,
 }
 
+/// `ensure_server` never returns a crashed server: it starts a new one, or
+/// returns an error. Design spec section 5.5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerState {
     Starting,
     Ready,
-    Crashed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

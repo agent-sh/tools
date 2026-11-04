@@ -19,7 +19,7 @@ import type {
   Position,
   SymbolInformation,
 } from "vscode-languageserver-protocol";
-import { DEFAULT_TIMEOUT_MS, LSP_SYMBOL_KIND_NAMES } from "./constants.js";
+import { DEFAULT_INITIALIZE_TIMEOUT_MS, LSP_SYMBOL_KIND_NAMES } from "./constants.js";
 import { LspServerCrashedError, LspServerExitedError } from "./errors.js";
 import type {
   LspClient,
@@ -64,7 +64,8 @@ const TIMED_OUT = Symbol("timed out");
 export interface SpawnLspClientOptions {
   /**
    * Bound for the `initialize` handshake, in ms. Defaults to
-   * DEFAULT_TIMEOUT_MS, the per-operation timeout (design spec section 8).
+   * DEFAULT_INITIALIZE_TIMEOUT_MS, the session backstop (design spec
+   * section 8), so a start can outlive the tool call that began it.
    */
   readonly initializeTimeoutMs?: number;
 }
@@ -94,7 +95,7 @@ interface ServerEntry {
 export function createSpawnLspClient(
   options: SpawnLspClientOptions = {},
 ): LspClient {
-  const initializeTimeoutMs = options.initializeTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const initializeTimeoutMs = options.initializeTimeoutMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS;
   const servers = new Map<string, ServerEntry>();
   /** Stops of retired servers, which may no longer be in `servers`. */
   const stops = new Set<Promise<void>>();

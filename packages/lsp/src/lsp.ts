@@ -166,12 +166,25 @@ export async function lsp(
     session.sessionBackstopMs ?? SESSION_BACKSTOP_MS;
   const effectiveTimeout = Math.min(timeoutMs, backstopMs);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), effectiveTimeout);
+  // Tell our own timeout apart from the caller cancelling, for the message.
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, effectiveTimeout);
   const onSessionAbort = (): void => controller.abort();
   if (session.signal?.aborted) controller.abort();
   else session.signal?.addEventListener("abort", onSessionAbort, { once: true });
 
   try {
+    if (controller.signal.aborted) {
+      return err(
+        toolError(
+          "TIMEOUT",
+          `LSP ${params.operation} was cancelled before it started. Nothing was sent to the ${profile.language} server.`,
+        ),
+      );
+    }
     let handle;
     try {
       handle = await session.client.ensureServer({
@@ -185,7 +198,9 @@ export async function lsp(
         return err(
           toolError(
             "TIMEOUT",
-            `LSP ${params.operation} exceeded ${effectiveTimeout}ms while the ${profile.language} server was starting. Retry; the server keeps starting in the background.`,
+            timedOut
+              ? `LSP ${params.operation} exceeded ${effectiveTimeout}ms while the ${profile.language} server was starting. The start goes on in the background; retry.`
+              : `LSP ${params.operation} was cancelled while the ${profile.language} server was starting. The start goes on in the background.`,
           ),
         );
       }
@@ -279,7 +294,12 @@ export async function lsp(
     } catch (e) {
       if (controller.signal.aborted) {
         return err(
-          toolError("TIMEOUT", `LSP ${params.operation} exceeded ${effectiveTimeout}ms.`),
+          toolError(
+            "TIMEOUT",
+            timedOut
+              ? `LSP ${params.operation} exceeded ${effectiveTimeout}ms.`
+              : `LSP ${params.operation} was cancelled.`,
+          ),
         );
       }
       if (e instanceof LspServerCrashedError) {

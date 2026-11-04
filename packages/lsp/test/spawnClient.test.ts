@@ -2,6 +2,11 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  DEFAULT_INITIALIZE_TIMEOUT_MS,
+  DEFAULT_TIMEOUT_MS,
+  SESSION_BACKSTOP_MS,
+} from "../src/constants.js";
 import { lsp } from "../src/lsp.js";
 import { createSpawnLspClient } from "../src/spawnClient.js";
 import type { LspServerProfile } from "../src/types.js";
@@ -27,7 +32,8 @@ type FakeMode =
   | "flood-stderr-then-die"
   | "die-on-hover"
   | "close-stdin-on-hover"
-  | "close-stdout-on-hover";
+  | "close-stdout-on-hover"
+  | "slow-initialize";
 
 // Cases that hung before their fix get a short limit, so a regression fails
 // fast instead of at the 30s default.
@@ -593,6 +599,84 @@ describe("spawn client: startup", () => {
         },
       });
       expect(await lsp(hover, session)).toMatchObject({ kind: "server_starting" });
+    } finally {
+      await client.closeSession();
+    }
+  }, HANG_LIMIT_MS);
+
+  it("lets a start outlive the tool call that began it with the default limits", () => {
+    // Every call's budget is capped by the session backstop.
+    const callBudget = Math.min(DEFAULT_TIMEOUT_MS, SESSION_BACKSTOP_MS);
+    expect(DEFAULT_INITIALIZE_TIMEOUT_MS).toBeGreaterThan(callBudget);
+  });
+
+  it("keeps a start slower than the call budget going: TIMEOUT, then server_starting, then the result", async () => {
+    // The same relation as the defaults, scaled down: initialize limit 3s,
+    // call budget 300ms, server ready after 800ms.
+    const client = createSpawnLspClient({ initializeTimeoutMs: 3_000 });
+    const file = write(root, "a.fake", "x\n");
+    const session = makeSession(root, client, {
+      manifest: { servers: { fake: fakeProfile("slow-initialize", root) } },
+      defaultTimeoutMs: 300,
+    });
+    const hover = { operation: "hover", path: file, line: 1, character: 1 };
+    try {
+      expect(await lsp(hover, session)).toMatchObject({
+        kind: "error",
+        error: {
+          code: "TIMEOUT",
+          message: expect.stringContaining("The start goes on in the background; retry."),
+        },
+      });
+      expect(await lsp(hover, session)).toMatchObject({ kind: "server_starting" });
+      await settle(800);
+      expect(await lsp(hover, session)).toMatchObject({ kind: "hover" });
+    } finally {
+      await client.closeSession();
+    }
+    expect(readFileSync(path.join(root, "spawns"), "utf8").trim().split("\n")).toHaveLength(1);
+  }, HANG_LIMIT_MS);
+
+  it("says a call cancelled before it started sent nothing", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    const session = makeSession(root, client, {
+      manifest: { servers: { fake: fakeProfile("well-behaved", root) } },
+      signal: AbortSignal.abort(),
+    });
+    try {
+      expect(
+        await lsp({ operation: "hover", path: file, line: 1, character: 1 }, session),
+      ).toMatchObject({
+        kind: "error",
+        error: {
+          code: "TIMEOUT",
+          message: expect.stringContaining("was cancelled before it started"),
+        },
+      });
+    } finally {
+      await client.closeSession();
+    }
+    expect(existsSync(path.join(root, "pid"))).toBe(false);
+  });
+
+  it("says a call cancelled during a start was cancelled, not timed out", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    const session = makeSession(root, client, {
+      manifest: { servers: { fake: fakeProfile("silent-on-initialize", root) } },
+      signal: AbortSignal.timeout(200),
+    });
+    try {
+      expect(
+        await lsp({ operation: "hover", path: file, line: 1, character: 1 }, session),
+      ).toMatchObject({
+        kind: "error",
+        error: {
+          code: "TIMEOUT",
+          message: expect.stringContaining("was cancelled while the fake server was starting"),
+        },
+      });
     } finally {
       await client.closeSession();
     }

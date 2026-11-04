@@ -250,6 +250,7 @@ Hint is operation-specific:
 | `DEFAULT_HEAD_LIMIT` | 200 (references, workspaceSymbol) | per-call `head_limit` |
 | `DEFAULT_TIMEOUT_MS` | 30_000 (per-op) | session config |
 | `SERVER_STARTUP_MAX_WAIT_MS` | 5_000 (first-call lazy wait before returning `server_starting`) | session config |
+| `DEFAULT_INITIALIZE_TIMEOUT_MS` | 60_000 (`SESSION_BACKSTOP_MS`; bound for the spawn client's `initialize`) | `createSpawnLspClient({ initializeTimeoutMs })` |
 | `MAX_HOVER_MARKDOWN_BYTES` | 10_000 (prune massive TSDoc) | session config |
 | `MAX_PREVIEW_LINE_LENGTH` | 200 chars per preview line | session config |
 | `MAX_WORKSPACE_SYMBOLS_SCANNED` | 10_000 (internal scan cap) | session config |
@@ -307,7 +308,7 @@ The tool returns `server_starting` when (1) has happened but (2) hasn't. The cli
 - **Simple op (documentSymbol on a tiny file)** — usually works before indexing completes. Try it; fall back to `server_starting` if the server rejects.
 - **Full-index op (references, workspaceSymbol)** — block up to `SERVER_STARTUP_MAX_WAIT_MS` for indexing, then return `server_starting` with `retry_ms`.
 
-The handshake itself is bounded. `initialize` gets the per-operation timeout (`DEFAULT_TIMEOUT_MS`, section 8); the spawn client takes `initializeTimeoutMs` to override it. When the bound passes, or the process exits or fails to spawn first, `ensureServer` rejects at once, the client stops the server (SIGTERM, then SIGKILL after 2s), and the tool returns `SERVER_NOT_AVAILABLE` with the reason. The next call starts a new server.
+The handshake itself is bounded by `DEFAULT_INITIALIZE_TIMEOUT_MS`, the session backstop (60s, section 8); the spawn client takes `initializeTimeoutMs` to override it. The session backstop also caps every call's budget, so with the defaults a slow start outlives the call that began it: that call returns `TIMEOUT`, and a later call gets `server_starting` or a result from the same server. When the process exits or fails to spawn, `ensureServer` rejects at once and the tool returns `SERVER_NOT_AVAILABLE` with the reason. When the bound passes, the client stops the server (SIGTERM, then SIGKILL after 2s) and the next call starts a new one.
 
 ### 5.4 Shutdown
 
@@ -374,7 +375,8 @@ LSP servers track `textDocument/didOpen` and `textDocument/didChange` to underst
 
 ## 8. Timeouts
 
-- Default 30s per tool call, starting the server included. The call's signal reaches `ensureServer`. When the start outlasts it, the call returns `TIMEOUT` and the server keeps starting (bounded by the client's `initialize` timeout), so the next call gets `server_starting` or a result.
+- Default 30s per tool call, starting the server included. The call's signal reaches `ensureServer`. When the start outlasts it, the call returns `TIMEOUT` and the server keeps starting, bounded by the client's `initialize` limit (60s by default, above the call budget), so the next call gets `server_starting` or a result.
+- A call cancelled through the session signal returns `TIMEOUT` with a message that says it was cancelled. A call whose signal is already aborted sends nothing and starts no server.
 - Session backstop 60s.
 - On timeout, SIGTERM the LSP request (if the server supports `$/cancelRequest`), return `TIMEOUT`. The server stays alive; subsequent calls reuse it.
 
