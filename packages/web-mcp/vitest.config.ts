@@ -6,6 +6,8 @@ const { version } = JSON.parse(readFileSync("./package.json", "utf8")) as { vers
 export default defineConfig({
   define: { __PACKAGE_VERSION__: JSON.stringify(version) },
   test: {
+    // Run in a fresh TMPDIR that is removed afterwards (see the script).
+    globalSetup: ["../../scripts/vitest-temp-dir.ts"],
     globals: false,
     environment: "node",
     include: ["test/**/*.test.ts"],

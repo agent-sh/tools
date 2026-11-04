@@ -1,5 +1,7 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": ["scripts/vitest-temp-dir.ts"],
+  "globalPassThroughEnv": ["TMPDIR"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
