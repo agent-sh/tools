@@ -108,6 +108,8 @@ impl LspClient for StubLspClient {
             language: language.to_string(),
             root: root.to_string(),
             state,
+            // One stub server per key, never replaced.
+            instance: 1,
         })
     }
 

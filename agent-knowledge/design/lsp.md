@@ -323,6 +323,7 @@ The handshake itself is bounded by `DEFAULT_INITIALIZE_TIMEOUT_MS`, the session 
 
 - If a ready server exits while no call is using it, the next call's `ensureServer` starts a new one and that call proceeds. A server that exits while it is still starting in the background is reported first (5.3): the next call gets `SERVER_NOT_AVAILABLE` with the reason, and the call after it starts a new server. Until its start has failed, such a server counts as starting, so a call in between gets `server_starting`, not a second server. `ensureServer` never returns a crashed handle: `ServerHandle.state` is `starting` or `ready`.
 - A call that sees the server die gets `SERVER_CRASHED`, and the call after it starts a new server.
+- **A handle names one server instance.** `ServerHandle.instance` is set by the client that made the handle, and an operation runs on that instance only. If the server died after the call got its handle and another call has since started a replacement under the same key (still spawning, starting or already ready), the operation does not touch the replacement: it fails with `SERVER_CRASHED` and the old instance's own reason (exit code or signal and stderr tail, or the broken pipe). The client keeps the reasons of replaced servers for the session backstop (60s, the longest any call can run), at most 32 of them, and drops them at `closeSession`. Past that bound, or for an instance it never knew, the call gets `SERVER_CRASHED` saying the server stopped after the call got its handle. Either way, the next call uses or starts the server now under the key.
 - A request in flight when the process exits rejects at once with `LspServerExitedError` (Rust: `LspClientError::Crashed`) (exit code or signal, plus the server's last stderr output). It does not wait for the per-op timeout. The tool returns it as `SERVER_CRASHED` for that call.
 - The client always drains the server's stderr, so a server that writes a lot of it never blocks on a full pipe. Only the last 4 KB is kept, for that error.
 - A server whose stdin breaks while the process lives can never take another message. The write that found it fails that call with `LspServerCrashedError` (Rust: `LspClientError::Crashed`; `SERVER_CRASHED`), and the client marks the server crashed and stops it, so the next call starts a new one.
@@ -413,6 +414,12 @@ interface ServerHandle {
   readonly language: string;
   readonly root: string;
   readonly state: "starting" | "ready"; // never "crashed": ensureServer re-spawns or rejects
+  // Which server instance the handle names, set by the client that made it
+  // and opaque to the tool, which passes the handle back unchanged. An
+  // operation on an instance that has been replaced fails with
+  // SERVER_CRASHED (5.5). An adapter that never replaces a server may use
+  // one fixed value.
+  readonly instance: number;
 }
 ```
 

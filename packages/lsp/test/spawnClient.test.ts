@@ -9,8 +9,9 @@ import {
   SESSION_BACKSTOP_MS,
 } from "../src/constants.js";
 import { lsp } from "../src/lsp.js";
+import { LspServerCrashedError } from "../src/errors.js";
 import { createSpawnLspClient } from "../src/spawnClient.js";
-import type { LspClient, LspServerProfile } from "../src/types.js";
+import type { LspClient, LspServerProfile, ServerHandle } from "../src/types.js";
 import { makeSession, makeTempDir, write } from "./helpers.js";
 
 const FAKE_SERVER = fileURLToPath(
@@ -1004,6 +1005,84 @@ describe("spawn client: startup", () => {
       await client.closeSession();
     }
   }, HANG_LIMIT_MS);
+});
+
+describe("spawn client: a handle names one server instance", () => {
+  /** A ready server, then SIGKILL, then the moment the client has its reason. */
+  async function crashedHandle(client: LspClient): Promise<ServerHandle> {
+    const handle = await client.ensureServer({
+      language: "fake",
+      root,
+      profile: fakeProfile("well-behaved", root),
+    });
+    expect(handle.state).toBe("ready");
+    const pid = serverPid(root);
+    process.kill(pid, "SIGKILL");
+    expect(await goneWithin(pid, 5_000)).toBe(true);
+    // The exit is reported one turn after Node's exit event.
+    await settle();
+    return handle;
+  }
+
+  it("reports the crash to a handle held across a crash and a starting replacement", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    try {
+      const stale = await crashedHandle(client);
+      // Another call starts a replacement, which answers initialize after
+      // 800ms, so it is still starting below.
+      const replacement = client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("slow-initialize", root),
+      });
+      const call = client.hover(stale, file, POS, new AbortController().signal);
+      await expect(call).rejects.toBeInstanceOf(LspServerCrashedError);
+      await expect(call).rejects.toThrow("was killed by SIGKILL");
+      expect((await replacement).state).toBe("ready");
+    } finally {
+      await client.closeSession();
+    }
+  });
+
+  it("does not run a handle held across a crash on the ready replacement", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    try {
+      const stale = await crashedHandle(client);
+      const fresh = await client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("well-behaved", root),
+      });
+      expect(fresh.instance).not.toBe(stale.instance);
+      await expect(client.hover(stale, file, POS, new AbortController().signal)).rejects.toThrow("was killed by SIGKILL");
+      await expect(client.hover(fresh, file, POS, new AbortController().signal)).resolves.toBeDefined();
+    } finally {
+      await client.closeSession();
+    }
+  });
+
+  it("keeps a replaced server's reason no longer than the session backstop", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    try {
+      const stale = await crashedHandle(client);
+      await client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("well-behaved", root),
+      });
+      const now = Date.now();
+      vi.spyOn(Date, "now").mockReturnValue(now + SESSION_BACKSTOP_MS + 1_000);
+      const call = client.hover(stale, file, POS, new AbortController().signal);
+      await expect(call).rejects.toBeInstanceOf(LspServerCrashedError);
+      await expect(call).rejects.toThrow("stopped after this call got its handle");
+    } finally {
+      vi.restoreAllMocks();
+      await client.closeSession();
+    }
+  });
 });
 
 describe("spawn client: stderr", () => {

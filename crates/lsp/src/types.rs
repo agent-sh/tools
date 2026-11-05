@@ -65,6 +65,12 @@ pub struct ServerHandle {
     pub language: String,
     pub root: String,
     pub state: ServerState,
+    /// The server instance this handle names, set by the client that made
+    /// it. An operation runs on that instance only: once another instance
+    /// has replaced it, the operation fails with `LspClientError::Crashed`
+    /// and the old instance's reason. Design spec 5.5 and 9.
+    #[serde(default)]
+    pub instance: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

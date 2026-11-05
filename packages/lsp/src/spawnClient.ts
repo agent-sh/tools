@@ -19,7 +19,11 @@ import type {
   Position,
   SymbolInformation,
 } from "vscode-languageserver-protocol";
-import { DEFAULT_INITIALIZE_TIMEOUT_MS, LSP_SYMBOL_KIND_NAMES } from "./constants.js";
+import {
+  DEFAULT_INITIALIZE_TIMEOUT_MS,
+  LSP_SYMBOL_KIND_NAMES,
+  SESSION_BACKSTOP_MS,
+} from "./constants.js";
 import { LspServerCrashedError, LspServerExitedError } from "./errors.js";
 import type {
   LspClient,
@@ -60,6 +64,13 @@ const STOP_STEP_MS = 2_000;
 const STDERR_TAIL_BYTES = 4_096;
 
 const TIMED_OUT = Symbol("timed out");
+
+/**
+ * How many replaced servers a client keeps for calls that still hold their
+ * handles. They are kept for at most the session backstop, the longest any
+ * call can run, so no call can outlive its server's record.
+ */
+const REPLACED_KEEP = 32;
 
 /**
  * On POSIX each server leads its own process group (`detached`, which also
@@ -138,6 +149,41 @@ export function createSpawnLspClient(
   const servers = new Map<string, ServerEntry>();
   /** Stops of retired servers, which may no longer be in `servers`. */
   const stops = new Set<Promise<void>>();
+  /** The next server instance id; each spawned server takes one. */
+  let nextInstance = 1;
+  /**
+   * Servers replaced under their key, oldest first, so a call that still
+   * holds a handle to one can report why it went (see `replacedError`).
+   */
+  const replaced: Array<{ entry: ServerEntry; at: number }> = [];
+
+  function keepReplaced(entry: ServerEntry): void {
+    replaced.push({ entry, at: Date.now() });
+    while (replaced.length > REPLACED_KEEP) replaced.shift();
+  }
+
+  /**
+   * The error for a call whose server has been replaced since it got its
+   * handle, or is gone: the old server's own reason while it is kept, else
+   * a plain crash. Either way the tool reports SERVER_CRASHED, and the next
+   * call uses or starts the server now under the key.
+   */
+  async function replacedError(h: ServerHandle): Promise<unknown> {
+    const now = Date.now();
+    while (replaced.length > 0 && now - replaced[0]!.at > SESSION_BACKSTOP_MS) replaced.shift();
+    const old = replaced.find((r) => r.entry.handle.instance === h.instance)?.entry;
+    if (old) {
+      if (old.gone.fired) return old.gone.reason;
+      // Its exit is reported a turn after the exit event; bounded anyway.
+      const reason = await within(old.gone.wait(), STOP_STEP_MS);
+      if (reason !== TIMED_OUT) return reason;
+    }
+    return new LspServerCrashedError(
+      h.language,
+      `Language server for ${h.language} stopped after this call got its handle.`,
+      "",
+    );
+  }
   function key(language: string, root: string): string {
     return `${language}|${root}`;
   }
@@ -270,6 +316,9 @@ export function createSpawnLspClient(
       servers.delete(k);
       throw reason;
     }
+    // A new server replaces it below. A call that still holds a handle to
+    // this one learns why it went.
+    if (existing) keepReplaced(existing);
 
     const [cmd, ...cmdArgs] = args.profile.command;
     if (!cmd) {
@@ -310,6 +359,7 @@ export function createSpawnLspClient(
       language: args.language,
       root: args.root,
       state: "starting",
+      instance: nextInstance++,
     };
     const entry: ServerEntry = {
       handle,
@@ -455,14 +505,13 @@ export function createSpawnLspClient(
   async function requireReady(h: ServerHandle): Promise<ServerEntry> {
     const entry = servers.get(key(h.language, h.root));
     // A server that died, or lost a pipe, since the caller got its handle
-    // reports that.
-    if (entry && (entry.gone.fired || (entry.state === "crashed" && !isRunning(entry.proc)))) {
+    // reports that, also once another server has replaced it under the key.
+    if (!entry || entry.handle.instance !== h.instance) throw await replacedError(h);
+    if (entry.gone.fired || (entry.state === "crashed" && !isRunning(entry.proc))) {
       throw await entry.gone.wait();
     }
-    if (!entry || entry.state !== "ready") {
-      throw new Error(
-        `Server for ${h.language} at ${h.root} is not ready (state=${entry?.state ?? "missing"})`,
-      );
+    if (entry.state !== "ready") {
+      throw new Error(`Server for ${h.language} at ${h.root} is not ready (state=${entry.state})`);
     }
     return entry;
   }
@@ -688,6 +737,7 @@ export function createSpawnLspClient(
   }
 
   async function closeSession(): Promise<void> {
+    replaced.length = 0;
     const entries = [...servers.values()];
     servers.clear();
     await Promise.all([

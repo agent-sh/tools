@@ -385,6 +385,7 @@ async fn handle_state_ready_means_ready() {
         language: "x".to_string(),
         root: "/".to_string(),
         state: ServerState::Ready,
+        instance: 1,
     };
     assert_eq!(h.state, ServerState::Ready);
     let v: Value = serde_json::to_value(&Position1 { line: 5, character: 10 }).unwrap();

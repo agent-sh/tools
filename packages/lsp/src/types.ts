@@ -60,6 +60,14 @@ export interface ServerHandle {
    * LspServerCrashedError instead.
    */
   readonly state: "starting" | "ready";
+  /**
+   * The server instance this handle names, set by the client that made it.
+   * An operation runs on that instance only: once another instance has
+   * replaced it, the operation rejects with LspServerCrashedError and the
+   * old instance's reason. An adapter that never replaces a server may use
+   * one fixed value. Design spec 5.5 and 9.
+   */
+  readonly instance: number;
 }
 
 export interface LspLocation {

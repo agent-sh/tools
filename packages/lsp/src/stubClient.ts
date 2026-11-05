@@ -85,6 +85,8 @@ export class StubLspClient implements LspClient {
       language: args.language,
       root: args.root,
       state,
+      // One stub server per key, never replaced.
+      instance: 1,
     };
     this.handles.set(key, handle);
     return handle;
