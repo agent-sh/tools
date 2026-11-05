@@ -66,11 +66,12 @@ const STDERR_TAIL_BYTES = 4_096;
 const TIMED_OUT = Symbol("timed out");
 
 /**
- * How many replaced servers a client keeps for calls that still hold their
- * handles. They are kept for at most the session backstop, the longest any
- * call can run, so no call can outlive its server's record.
+ * Bounds on the replaced servers a client keeps for calls that still hold
+ * their handles: at most `count` of them, for at most `ms`, the session
+ * backstop, the longest any call can run, so no call can outlive its
+ * server's record. Tests lower them; the package does not export this.
  */
-const REPLACED_KEEP = 32;
+export const replacedKeep = { count: 32, ms: SESSION_BACKSTOP_MS };
 
 /**
  * On POSIX each server leads its own process group (`detached`, which also
@@ -154,12 +155,26 @@ export function createSpawnLspClient(
   /**
    * Servers replaced under their key, oldest first, so a call that still
    * holds a handle to one can report why it went (see `replacedError`).
+   * Each keeps only its identity and its gone notice; `at` is on the
+   * monotonic clock.
    */
-  const replaced: Array<{ entry: ServerEntry; at: number }> = [];
+  const replaced: Array<{ instance: number; language: string; gone: GoneNotice; at: number }> = [];
+
+  /** Drop records older than the age bound or beyond the newest `count`. */
+  function pruneReplaced(): void {
+    const now = performance.now();
+    while (replaced.length > 0 && now - replaced[0]!.at > replacedKeep.ms) replaced.shift();
+    while (replaced.length > replacedKeep.count) replaced.shift();
+  }
 
   function keepReplaced(entry: ServerEntry): void {
-    replaced.push({ entry, at: Date.now() });
-    while (replaced.length > REPLACED_KEEP) replaced.shift();
+    replaced.push({
+      instance: entry.handle.instance,
+      language: entry.handle.language,
+      gone: entry.gone,
+      at: performance.now(),
+    });
+    pruneReplaced();
   }
 
   /**
@@ -169,9 +184,8 @@ export function createSpawnLspClient(
    * call uses or starts the server now under the key.
    */
   async function replacedError(h: ServerHandle): Promise<unknown> {
-    const now = Date.now();
-    while (replaced.length > 0 && now - replaced[0]!.at > SESSION_BACKSTOP_MS) replaced.shift();
-    const old = replaced.find((r) => r.entry.handle.instance === h.instance)?.entry;
+    pruneReplaced();
+    const old = replaced.find((r) => r.instance === h.instance);
     if (old) {
       if (old.gone.fired) return old.gone.reason;
       // Its exit is reported a turn after the exit event; bounded anyway.

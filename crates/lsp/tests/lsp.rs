@@ -377,6 +377,17 @@ async fn error_result_serializes_with_kind_tag() {
     assert_eq!(v.get("kind").and_then(|x| x.as_str()), Some("error"));
 }
 
+// ---- A handle on the wire must name its instance ----
+
+#[test]
+fn a_handle_without_an_instance_does_not_parse() {
+    let without = serde_json::json!({ "language": "x", "root": "/", "state": "ready" });
+    assert!(serde_json::from_value::<ServerHandle>(without).is_err());
+    let with = serde_json::json!({ "language": "x", "root": "/", "state": "ready", "instance": 3 });
+    let h: ServerHandle = serde_json::from_value(with).unwrap();
+    assert_eq!(h.instance, 3);
+}
+
 // ---- Unused handle state smoke ----
 
 #[tokio::test]

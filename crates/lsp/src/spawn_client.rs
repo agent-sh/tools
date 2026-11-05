@@ -999,6 +999,42 @@ fn map_symbol_information(v: &Value) -> LspSymbolInfo {
     }
 }
 
+/// Test hook: how the slow-spawn hook holds a spawn's thread. Only the
+/// Unix tests set it.
+#[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
+enum Hold {
+    /// For a fixed time, as an exec on a hung mount would.
+    For(Duration),
+    /// Until the test lets it pass.
+    Until(Arc<Gate>),
+}
+
+/// Test hook: a gate that lets one blocked spawn through per permit.
+#[cfg(test)]
+#[derive(Default)]
+struct Gate {
+    permits: StdMutex<usize>,
+    open: std::sync::Condvar,
+}
+
+#[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
+impl Gate {
+    fn release(&self, n: usize) {
+        *self.permits.lock().unwrap() += n;
+        self.open.notify_all();
+    }
+
+    fn pass(&self) {
+        let mut permits = self.permits.lock().unwrap();
+        while *permits == 0 {
+            permits = self.open.wait(permits).unwrap();
+        }
+        *permits -= 1;
+    }
+}
+
 /// Where the server a handle names stands under its key.
 enum Lookup {
     /// It is the server under the key.
@@ -1009,10 +1045,42 @@ enum Lookup {
     Gone,
 }
 
-/// A server that a new one replaced under its key, and when.
+/// A server instance that is no longer under its key, kept so a call that
+/// still holds its handle can say why: a server another one replaced, or a
+/// spawn that failed or panicked.
 struct Retired {
     at: tokio::time::Instant,
-    entry: Arc<ServerEntry>,
+    instance: u64,
+    why: Why,
+}
+
+enum Why {
+    /// A replaced server whose reason is not set yet. Its open files are
+    /// dropped when it is kept, and the entry itself once the reason is set.
+    Server(Arc<ServerEntry>),
+    Reason(LspClientError),
+}
+
+/// Drop records older than `keep_for` or beyond the newest `keep`, and keep
+/// only the reason of a replaced server once it is set.
+fn prune(retired: &mut VecDeque<Retired>, (keep, keep_for): (usize, Duration)) {
+    let now = tokio::time::Instant::now();
+    while retired
+        .front()
+        .is_some_and(|r| now.duration_since(r.at) > keep_for)
+    {
+        retired.pop_front();
+    }
+    while retired.len() > keep {
+        retired.pop_front();
+    }
+    for r in retired.iter_mut() {
+        if let Why::Server(entry) = &r.why {
+            if let Some(reason) = entry.gone_reason() {
+                r.why = Why::Reason(reason);
+            }
+        }
+    }
 }
 
 /// How many replaced servers a client keeps for calls that still hold their
@@ -1047,7 +1115,7 @@ pub struct SpawnLspClient {
     /// Test hook: block every spawn of this language for this long, as an
     /// exec on a hung mount would, and add a permit once each begins.
     #[cfg(test)]
-    slow_spawn: Option<(String, Duration, Arc<tokio::sync::Semaphore>)>,
+    slow_spawn: Option<(String, Hold, Arc<tokio::sync::Semaphore>)>,
     /// Test hook: the next spawn panics.
     #[cfg(test)]
     panic_spawn: std::sync::atomic::AtomicBool,
@@ -1060,19 +1128,28 @@ pub struct SpawnLspClient {
 /// spawn that panics does not leave its key `server_starting` until
 /// `close_session`. On every other path the placeholder is gone by then.
 struct Unclaim<'a> {
-    servers: &'a StdMutex<HashMap<String, Slot>>,
+    client: &'a SpawnLspClient,
+    language: String,
     key: String,
     claim: u64,
 }
 
 impl Drop for Unclaim<'_> {
     fn drop(&mut self) {
-        let mut servers = match self.servers.lock() {
+        let mut servers = match self.client.servers.lock() {
             Ok(servers) => servers,
             Err(poisoned) => poisoned.into_inner(),
         };
         if matches!(servers.get(&self.key), Some(Slot::Spawning(c, _)) if *c == self.claim) {
             servers.remove(&self.key);
+            // A `starting` handle may name this claim: tell it what happened.
+            self.client.keep_reason(
+                self.claim,
+                LspClientError::Other(format!(
+                    "The {} server could not be started: its spawn panicked.",
+                    self.language
+                )),
+            );
         }
     }
 }
@@ -1126,10 +1203,13 @@ impl SpawnLspClient {
             }
         };
         #[cfg(test)]
-        if let Some((slow, pause, began)) = &self.slow_spawn {
+        if let Some((slow, hold, began)) = &self.slow_spawn {
             if slow == language {
                 began.add_permits(1);
-                std::thread::sleep(*pause);
+                match hold {
+                    Hold::For(pause) => std::thread::sleep(*pause),
+                    Hold::Until(gate) => gate.pass(),
+                }
             }
         }
         #[cfg(test)]
@@ -1310,47 +1390,63 @@ impl SpawnLspClient {
     }
 
     /// Keep a server that a new one replaces under its key, for calls that
-    /// still hold its handle. Bounded in count and in age.
+    /// still hold its handle. Bounded in count and in age. Called with the
+    /// `servers` lock held, as `close_session` clears the records under it.
     fn retire_instance(&self, entry: Arc<ServerEntry>) {
-        let (keep, _) = self.retired_keep;
-        let mut retired = self.retired.lock().unwrap();
+        // The server can serve no more calls: its open files are no use.
+        entry.opened.lock().unwrap().clear();
+        let why = match entry.gone_reason() {
+            Some(reason) => Why::Reason(reason),
+            None => Why::Server(Arc::clone(&entry)),
+        };
+        self.keep(entry.instance, why);
+    }
+
+    /// Keep why the spawn of `instance` ended without a server, for a
+    /// `starting` handle that names it. Called with the `servers` lock held.
+    fn keep_reason(&self, instance: u64, reason: LspClientError) {
+        self.keep(instance, Why::Reason(reason));
+    }
+
+    fn keep(&self, instance: u64, why: Why) {
+        let mut retired = match self.retired.lock() {
+            Ok(retired) => retired,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         retired.push_back(Retired {
             at: tokio::time::Instant::now(),
-            entry,
+            instance,
+            why,
         });
-        while retired.len() > keep {
-            retired.pop_front();
-        }
+        prune(&mut retired, self.retired_keep);
     }
 
     /// The error for a call whose server has been replaced since it got its
-    /// handle, or is gone: the old server's own reason while it is kept,
-    /// else a plain crash. Either way the tool reports `SERVER_CRASHED`, and
-    /// the next call uses or starts the server now under the key.
+    /// handle, or is gone: the old server's own reason while it is kept
+    /// (`SERVER_CRASHED`), or the spawn's own error for a server that never
+    /// ran, else a plain crash. The next call uses or starts the server now
+    /// under the key.
     async fn replaced(&self, handle: &ServerHandle) -> LspClientError {
         let old = {
-            let (_, keep_for) = self.retired_keep;
             let mut retired = self.retired.lock().unwrap();
-            let now = tokio::time::Instant::now();
-            while retired
-                .front()
-                .is_some_and(|r| now.duration_since(r.at) > keep_for)
-            {
-                retired.pop_front();
-            }
+            prune(&mut retired, self.retired_keep);
             retired
                 .iter()
-                .find(|r| r.entry.instance == handle.instance)
-                .map(|r| Arc::clone(&r.entry))
+                .find(|r| r.instance == handle.instance)
+                .map(|r| match &r.why {
+                    Why::Reason(reason) => Err(reason.clone()),
+                    Why::Server(entry) => Ok(Arc::clone(entry)),
+                })
         };
-        if let Some(old) = old {
-            if let Some(reason) = old.gone_reason() {
-                return reason;
+        match old {
+            Some(Err(reason)) => return reason,
+            Some(Ok(old)) => {
+                // Its exit is reported within the stderr settle; bounded.
+                if let Ok(reason) = tokio::time::timeout(STOP_STEP, old.wait_gone()).await {
+                    return reason;
+                }
             }
-            // Its exit is reported within the stderr settle; bounded anyway.
-            if let Ok(reason) = tokio::time::timeout(STOP_STEP, old.wait_gone()).await {
-                return reason;
-            }
+            None => {}
         }
         LspClientError::Crashed(crash_message(
             format!(
@@ -1472,6 +1568,7 @@ impl LspClient for SpawnLspClient {
         // lock, so a slow exec on one key holds up no other key.
         let claim = {
             let mut servers = self.servers.lock().unwrap();
+            let mut replaced = None;
             match servers.get(&key) {
                 Some(Slot::Spawning(claim, _)) => return Ok(starting(*claim)),
                 Some(Slot::Server(entry)) => {
@@ -1481,9 +1578,6 @@ impl LspClient for SpawnLspClient {
                         drop(st);
                         return Ok(entry.handle());
                     }
-                    if *cancel.borrow() {
-                        return Err(LspClientError::Aborted);
-                    }
                     // A start that failed after its caller gave up: report
                     // it once; the call after this one starts a new server.
                     if let Some(reason) = st.unreported_start_error.take() {
@@ -1492,16 +1586,17 @@ impl LspClient for SpawnLspClient {
                         return Err(reason);
                     }
                     drop(st);
-                    if !*cancel.borrow() {
-                        // A new server replaces it below. A call that still
-                        // holds a handle to this one learns why it went.
-                        self.retire_instance(entry);
-                    }
+                    replaced = Some(entry);
                 }
                 None => {}
             }
             if *cancel.borrow() {
                 return Err(LspClientError::Aborted);
+            }
+            // A new server replaces it. A call that still holds a handle to
+            // this one learns why it went.
+            if let Some(entry) = replaced {
+                self.retire_instance(entry);
             }
             let claim = self.next_spawn.fetch_add(1, Ordering::Relaxed);
             let (handled, handled_rx) = watch::channel(());
@@ -1510,7 +1605,8 @@ impl LspClient for SpawnLspClient {
         };
         let (claim, handled) = claim;
         let unclaim = Unclaim {
-            servers: &self.servers,
+            client: self,
+            language: language.to_string(),
             key: key.clone(),
             claim,
         };
@@ -1540,6 +1636,8 @@ impl LspClient for SpawnLspClient {
                 Err(e) => {
                     if still_ours {
                         servers.remove(&key);
+                        // A `starting` handle may name this claim.
+                        self.keep_reason(claim, e.clone());
                     }
                     return Err(e);
                 }
@@ -1675,14 +1773,19 @@ impl LspClient for SpawnLspClient {
 
     /// Stop every server, in parallel, and return once each has exited.
     async fn close_session(&self) {
-        self.retired.lock().unwrap().clear();
         let mut entries: Vec<Arc<ServerEntry>> = Vec::new();
         let mut spawning: Vec<watch::Receiver<()>> = Vec::new();
-        for (_, slot) in self.servers.lock().unwrap().drain() {
-            match slot {
-                Slot::Server(e) => entries.push(e),
-                Slot::Spawning(_, handled) => spawning.push(handled),
+        {
+            let mut servers = self.servers.lock().unwrap();
+            for (_, slot) in servers.drain() {
+                match slot {
+                    Slot::Server(e) => entries.push(e),
+                    Slot::Spawning(_, handled) => spawning.push(handled),
+                }
             }
+            // Under the same lock: every record is kept under it, so none
+            // made for this session can outlive the close.
+            self.retired.lock().unwrap().clear();
         }
         for entry in &entries {
             entry.begin_stop();
@@ -1969,7 +2072,7 @@ mod tests {
         // mount would.
         client.slow_spawn = Some((
             "slow".to_string(),
-            Duration::from_secs(6),
+            Hold::For(Duration::from_secs(6)),
             Arc::clone(&began),
         ));
         let client = Arc::new(client);
@@ -2085,7 +2188,7 @@ mod tests {
         // The spawn blocks its thread for 500ms before the exec.
         client.slow_spawn = Some((
             "fake".to_string(),
-            Duration::from_millis(500),
+            Hold::For(Duration::from_millis(500)),
             Arc::clone(&began),
         ));
         let client = Arc::new(client);
@@ -2196,7 +2299,7 @@ mod tests {
         // would: three stop steps.
         client.slow_spawn = Some((
             "fake".to_string(),
-            Duration::from_secs(6),
+            Hold::For(Duration::from_secs(6)),
             Arc::clone(&began),
         ));
         let client = Arc::new(client);
@@ -2497,14 +2600,15 @@ mod tests {
     async fn a_handle_held_while_a_replacement_spawns_reports_the_crash() {
         let (_dir, root) = temp_root();
         let began = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = Arc::new(Gate::default());
         let mut client = SpawnLspClient::new();
-        // Every spawn blocks its thread for 1s, so the replacement's
-        // placeholder is in the map for that long.
+        // Every spawn waits at the gate; the first one may pass at once.
         client.slow_spawn = Some((
             "fake".to_string(),
-            Duration::from_secs(1),
+            Hold::Until(Arc::clone(&gate)),
             Arc::clone(&began),
         ));
+        gate.release(1);
         let client = Arc::new(client);
         let (stale, reason) = crashed_handle(&client, &root).await;
         began.acquire().await.unwrap().forget();
@@ -2528,6 +2632,7 @@ mod tests {
             Some(Slot::Spawning(..))
         ));
         let r = hover_with(&client, &stale, &root).await;
+        gate.release(1);
         assert_eq!(
             r,
             Err(reason),
@@ -2541,12 +2646,13 @@ mod tests {
     async fn a_starting_handle_for_a_spawn_in_flight_is_not_ready_rather_than_crashed() {
         let (_dir, root) = temp_root();
         let began = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = Arc::new(Gate::default());
         let mut client = SpawnLspClient::new();
-        // The spawn blocks its thread for 1s; then the server answers
-        // initialize 800ms after it reads it.
+        // The spawn waits at the gate; then the server answers initialize
+        // only once the test writes `reply-initialize`.
         client.slow_spawn = Some((
             "fake".to_string(),
-            Duration::from_secs(1),
+            Hold::Until(Arc::clone(&gate)),
             Arc::clone(&began),
         ));
         let client = Arc::new(client);
@@ -2556,7 +2662,7 @@ mod tests {
             tokio::spawn(async move {
                 let (_tx, rx) = watch::channel(false);
                 client
-                    .ensure_server("fake", &root, &fake_profile("slow-initialize", &root), rx)
+                    .ensure_server("fake", &root, &fake_profile("hold-initialize", &root), rx)
                     .await
             })
         };
@@ -2564,7 +2670,7 @@ mod tests {
         // A second call finds the placeholder and gets a `starting` handle.
         let (_tx, rx) = watch::channel(false);
         let starting = client
-            .ensure_server("fake", &root, &fake_profile("slow-initialize", &root), rx)
+            .ensure_server("fake", &root, &fake_profile("hold-initialize", &root), rx)
             .await
             .unwrap();
         assert_eq!(starting.state, ServerState::Starting);
@@ -2581,6 +2687,7 @@ mod tests {
             not_ready,
             "during the spawn"
         );
+        gate.release(1);
         // The spawn is done and the server is starting: the same answer.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while !matches!(
@@ -2598,7 +2705,157 @@ mod tests {
             not_ready,
             "after the spawn"
         );
+        std::fs::write(Path::new(&root).join("reply-initialize"), "").unwrap();
         assert_eq!(first.await.unwrap().unwrap().state, ServerState::Ready);
+        client.close_session().await;
+    }
+
+    /// Starts a spawn that waits at a gate, and returns the `starting`
+    /// handle a second call gets for it, the first call's task and the gate.
+    async fn starting_handle_held_at_the_gate(
+        client: &mut Option<SpawnLspClient>,
+        root: &str,
+        profile: LspServerProfile,
+    ) -> (
+        Arc<SpawnLspClient>,
+        ServerHandle,
+        tokio::task::JoinHandle<Result<ServerHandle, LspClientError>>,
+        Arc<Gate>,
+    ) {
+        let began = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = Arc::new(Gate::default());
+        let mut c = client.take().unwrap();
+        c.slow_spawn = Some((
+            "fake".to_string(),
+            Hold::Until(Arc::clone(&gate)),
+            Arc::clone(&began),
+        ));
+        let client = Arc::new(c);
+        let first = {
+            let client = Arc::clone(&client);
+            let root = root.to_string();
+            let profile = profile.clone();
+            tokio::spawn(async move {
+                let (_tx, rx) = watch::channel(false);
+                client.ensure_server("fake", &root, &profile, rx).await
+            })
+        };
+        began.acquire().await.unwrap().forget();
+        let (_tx, rx) = watch::channel(false);
+        let starting = client
+            .ensure_server("fake", root, &profile, rx)
+            .await
+            .unwrap();
+        assert_eq!(starting.state, ServerState::Starting);
+        (client, starting, first, gate)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_starting_handle_for_a_spawn_that_fails_gets_the_spawn_s_error() {
+        let (_dir, root) = temp_root();
+        let mut profile = fake_profile("well-behaved", &root);
+        profile.command = vec![format!("{root}/no-such-server")];
+        let (client, starting, first, gate) =
+            starting_handle_held_at_the_gate(&mut Some(SpawnLspClient::new()), &root, profile)
+                .await;
+        gate.release(1);
+        let spawn_error = first.await.unwrap().expect_err("the spawn must fail");
+        assert!(
+            spawn_error.to_string().contains("no-such-server"),
+            "{spawn_error}"
+        );
+        assert_eq!(
+            hover_with(&client, &starting, &root).await,
+            Err(spawn_error),
+            "the starting handle did not get the spawn's own error"
+        );
+        client.close_session().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_starting_handle_for_a_spawn_that_panics_is_told_so() {
+        let (_dir, root) = temp_root();
+        let client = SpawnLspClient::new();
+        client.panic_spawn.store(true, Ordering::SeqCst);
+        let (client, starting, first, gate) = starting_handle_held_at_the_gate(
+            &mut Some(client),
+            &root,
+            fake_profile("well-behaved", &root),
+        )
+        .await;
+        gate.release(1);
+        assert!(first.await.unwrap_err().is_panic());
+        assert_eq!(
+            hover_with(&client, &starting, &root).await,
+            Err(LspClientError::Other(
+                "The fake server could not be started: its spawn panicked.".to_string()
+            ))
+        );
+        client.close_session().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn close_session_drops_the_kept_reasons() {
+        let (_dir, root) = temp_root();
+        let client = SpawnLspClient::new();
+        let (stale, reason) = crashed_handle(&client, &root).await;
+        let (_tx, rx) = watch::channel(false);
+        client
+            .ensure_server("fake", &root, &fake_profile("well-behaved", &root), rx)
+            .await
+            .unwrap();
+        assert_eq!(
+            hover_with(&client, &stale, &root).await,
+            Err(reason.clone())
+        );
+        client.close_session().await;
+        let r = hover_with(&client, &stale, &root).await;
+        assert_ne!(r, Err(reason), "a kept reason outlived close_session");
+        assert!(client.retired.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn kept_servers_hold_only_their_reason_and_are_pruned_on_insert() {
+        let (_dir, root) = temp_root();
+        let mut client = SpawnLspClient::new();
+        client.retired_keep = (32, Duration::from_millis(300));
+        let (first, _) = crashed_handle(&client, &root).await;
+        let (_tx, rx) = watch::channel(false);
+        client
+            .ensure_server("fake", &root, &fake_profile("well-behaved", &root), rx)
+            .await
+            .unwrap();
+        {
+            let retired = client.retired.lock().unwrap();
+            assert_eq!(retired.len(), 1);
+            assert_eq!(retired[0].instance, first.instance);
+            // Its reason was set before the replacement: no entry is kept.
+            assert!(
+                matches!(retired[0].why, Why::Reason(_)),
+                "a kept server still holds its entry"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // A second replacement, past the first record's age: the insert
+        // drops it, with no stale call looking it up.
+        let (second, _) = crashed_handle(&client, &root).await;
+        let (_tx, rx) = watch::channel(false);
+        client
+            .ensure_server("fake", &root, &fake_profile("well-behaved", &root), rx)
+            .await
+            .unwrap();
+        let instances: Vec<u64> = client
+            .retired
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.instance)
+            .collect();
+        assert_eq!(
+            instances,
+            vec![second.instance],
+            "an old record outlived its age"
+        );
         client.close_session().await;
     }
 

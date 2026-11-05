@@ -10,7 +10,7 @@ import {
 } from "../src/constants.js";
 import { lsp } from "../src/lsp.js";
 import { LspServerCrashedError } from "../src/errors.js";
-import { createSpawnLspClient } from "../src/spawnClient.js";
+import { createSpawnLspClient, replacedKeep } from "../src/spawnClient.js";
 import type { LspClient, LspServerProfile, ServerHandle } from "../src/types.js";
 import { makeSession, makeTempDir, write } from "./helpers.js";
 
@@ -1073,13 +1073,61 @@ describe("spawn client: a handle names one server instance", () => {
         root,
         profile: fakeProfile("well-behaved", root),
       });
-      const now = Date.now();
-      vi.spyOn(Date, "now").mockReturnValue(now + SESSION_BACKSTOP_MS + 1_000);
+      // Ages are read on the monotonic clock.
+      const realNow = performance.now.bind(performance);
+      vi.spyOn(performance, "now").mockImplementation(() => realNow() + SESSION_BACKSTOP_MS + 1_000);
       const call = client.hover(stale, file, POS, new AbortController().signal);
       await expect(call).rejects.toBeInstanceOf(LspServerCrashedError);
       await expect(call).rejects.toThrow("stopped after this call got its handle");
     } finally {
       vi.restoreAllMocks();
+      await client.closeSession();
+    }
+  });
+
+  it("keeps no more replaced servers than the count bound", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    const saved = replacedKeep.count;
+    replacedKeep.count = 1;
+    try {
+      const first = await crashedHandle(client);
+      const second = await crashedHandle(client);
+      await client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("well-behaved", root),
+      });
+      await expect(client.hover(second, file, POS, new AbortController().signal)).rejects.toThrow(
+        "was killed by SIGKILL",
+      );
+      await expect(client.hover(first, file, POS, new AbortController().signal)).rejects.toThrow(
+        "stopped after this call got its handle",
+      );
+    } finally {
+      replacedKeep.count = saved;
+      await client.closeSession();
+    }
+  });
+
+  it("drops the kept servers at closeSession", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    try {
+      const stale = await crashedHandle(client);
+      await client.ensureServer({
+        language: "fake",
+        root,
+        profile: fakeProfile("well-behaved", root),
+      });
+      await expect(client.hover(stale, file, POS, new AbortController().signal)).rejects.toThrow(
+        "was killed by SIGKILL",
+      );
+      await client.closeSession();
+      await expect(client.hover(stale, file, POS, new AbortController().signal)).rejects.toThrow(
+        "stopped after this call got its handle",
+      );
+    } finally {
       await client.closeSession();
     }
   });
