@@ -1,5 +1,26 @@
 # @agent-sh/harness-tools
 
+## 0.10.0
+
+### Minor Changes
+
+- 8336c55: A server handle now names one server instance. An operation whose server died after the call got its handle, and was replaced by another call under the same language and root, no longer fails with `IO_ERROR` "not ready (state=starting)" or runs on the replacement: it gets `SERVER_CRASHED` with the old server's own reason. The client keeps the reasons of replaced servers for the 60s session backstop, at most 32 of them; past that, the call gets `SERVER_CRASHED` saying the server stopped after the call got its handle.
+
+  Breaking: `ServerHandle` has a new required field, `instance`, set by the client that made the handle. An `LspClient` adapter that builds handles must set it; one that never replaces a server may use a fixed value.
+
+- 339f9c0: Report a language server that exits instead of hanging on it. A request in flight when the server process exits now rejects at once with `LspServerExitedError`, which carries the exit code or signal and the last 4 KB of the server's stderr, and the `lsp` tool returns `SERVER_CRASHED` for that call. `ensureServer` rejects when the server exits, fails to spawn, breaks a pipe or answers `initialize` with an error during startup, and `initialize` is bounded by `DEFAULT_INITIALIZE_TIMEOUT_MS`, the 60s session backstop, which outlasts the 30s call budget (`initializeTimeoutMs` on `createSpawnLspClient` overrides it). The client now drains the server's stderr, so a server that writes a lot of it can no longer block. A server whose stdin breaks after startup is marked crashed and stopped, so the next call starts a new one instead of reusing a server that cannot be reached. A server whose stdout closes while it stays alive is retired the same way after a 2s grace. The call that finds a broken pipe now gets `SERVER_CRASHED` (`LspServerCrashedError`, the new base class of `LspServerExitedError`). `ensureServer` takes the call's signal, so the `lsp` tool's timeout covers a slow start; the server keeps starting and the next call gets `server_starting`. A start that fails after its call gave up is reported once to the next call as `SERVER_NOT_AVAILABLE`, with the exit code or signal and the stderr tail, or with the missed `initialize` bound. A call cancelled through the session signal now says so, and one whose signal is already aborted starts no server.
+
+  Breaking: `ServerHandle.state` no longer includes `crashed`, which `ensureServer` never returned. Code that compares the state with `"crashed"`, or an `LspClient` adapter that returns it, no longer compiles; an adapter should throw `LspServerCrashedError` instead.
+
+### Patch Changes
+
+- Updated dependencies [50a93c3]
+- Updated dependencies [8336c55]
+- Updated dependencies [6ac8240]
+- Updated dependencies [339f9c0]
+- Updated dependencies [54140d3]
+  - @agent-sh/harness-lsp@0.10.0
+
 ## 0.9.2
 
 ### Patch Changes
