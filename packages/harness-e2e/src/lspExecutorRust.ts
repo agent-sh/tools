@@ -176,16 +176,27 @@ export function makeLspExecutorRust(session: LspSessionConfig): RustLspRunner {
     return raw;
   }
 
+  /**
+   * At the end of its input the CLI stops its language servers, their
+   * children included, and exits. Wait for that; send SIGTERM, which does
+   * the same, only when the CLI has not exited in time. A stop takes at
+   * most five 2s steps, so 15s is past any normal close.
+   */
   async function close(): Promise<void> {
-    if (proc && !proc.killed) {
-      proc.stdin?.end();
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-    }
+    const p = proc;
     proc = null;
+    if (!p || p.exitCode !== null || p.signalCode !== null) return;
+    const exited = new Promise<boolean>((resolve) => p.once("exit", () => resolve(true)));
+    const after = (ms: number): Promise<boolean> =>
+      new Promise((resolve) => setTimeout(() => resolve(false), ms).unref());
+    p.stdin?.end();
+    if (await Promise.race([exited, after(15_000)])) return;
+    try {
+      p.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+    await Promise.race([exited, after(15_000)]);
   }
 
   const runner = { tool, execute, close };

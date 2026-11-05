@@ -61,6 +61,14 @@ const STDERR_TAIL_BYTES = 4_096;
 
 const TIMED_OUT = Symbol("timed out");
 
+/**
+ * On POSIX each server leads its own process group (`detached`, which also
+ * gives it its own session), so a signal reaches its children too, such as
+ * tsserver under typescript-language-server. Windows has no process groups:
+ * there the client signals the server process only. Design spec 5.4.
+ */
+const OWN_GROUP = process.platform !== "win32";
+
 export interface SpawnLspClientOptions {
   /**
    * Bound for the `initialize` handshake, in ms. Defaults to
@@ -249,6 +257,7 @@ export function createSpawnLspClient(
       cwd: args.root,
       stdio: ["pipe", "pipe", "pipe"],
       env: process.env,
+      detached: OWN_GROUP,
     });
 
     // Drain stderr: once the pipe fills, a server that keeps writing to it
@@ -313,6 +322,9 @@ export function createSpawnLspClient(
       else entry.state = "crashed";
     });
     proc.on("exit", (code, signal) => {
+      // The server is gone; its children go with it, whether it exited on
+      // its own, on `exit`, or on a signal some child ignored.
+      killGroup(proc);
       markCrashed();
       resolveExited();
       // One more turn lets stderr that is already in the pipe arrive, so
@@ -640,9 +652,9 @@ export function createSpawnLspClient(
         return;
       }
       if (!isRunning(proc)) return;
-      proc.kill("SIGTERM");
+      signalServer(proc, "SIGTERM");
       if ((await within(exited, STOP_STEP_MS)) !== TIMED_OUT) return;
-      proc.kill("SIGKILL");
+      signalServer(proc, "SIGKILL");
       await within(exited, STOP_STEP_MS);
     } finally {
       conn.dispose();
@@ -721,6 +733,38 @@ function messageOf(e: unknown): string {
 }
 
 /** True while the process was spawned and has not exited yet. */
+/**
+ * Signal the server and, on POSIX, everything in its process group. Sent
+ * only while the server has not exited, so its pid, and with it the group
+ * id, are still its own.
+ */
+function signalServer(proc: ChildProcess, signal: NodeJS.Signals): void {
+  if (OWN_GROUP && proc.pid !== undefined) {
+    try {
+      process.kill(-proc.pid, signal);
+      return;
+    } catch {
+      // No such group: fall back to the process itself.
+    }
+  }
+  proc.kill(signal);
+}
+
+/**
+ * Kill what is left of the process group of a server that has exited.
+ * Node reaps the server before it emits `exit`, so in theory a new process
+ * could take the group id first; that needs the pid space to wrap around
+ * within that one turn of the event loop.
+ */
+function killGroup(proc: ChildProcess): void {
+  if (!OWN_GROUP || proc.pid === undefined) return;
+  try {
+    process.kill(-proc.pid, "SIGKILL");
+  } catch {
+    // The group is already empty.
+  }
+}
+
 function isRunning(proc: ChildProcess): boolean {
   return (
     proc.pid !== undefined && proc.exitCode === null && proc.signalCode === null

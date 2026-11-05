@@ -87,9 +87,10 @@ async fn initialize_is_bounded_and_the_server_is_stopped() {
                     .to_string()
             )
         );
-        let pid = fake.pid();
         client.close_session().await;
-        assert!(!alive(pid), "the server is still running");
+        // The server is stopped at the limit, maybe before node wrote its
+        // pid: look for any process started for this test's root instead.
+        assert_eq!(fake.running(), Vec::<i32>::new(), "the server is still running");
     })
     .await;
 }

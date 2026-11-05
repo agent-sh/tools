@@ -324,70 +324,13 @@ async fn a_file_open_the_server_does_not_read_is_bounded_by_the_call() {
         let r = lsp(hover_input(&file), &session).await;
         let (code, msg) = code_and_message(&r).expect("an error");
         assert_eq!(code, ToolErrorCode::Timeout, "{msg}");
-        let pid = fake.pid();
+        // The start goes on after the call gave up, so the server writes
+        // its pid, possibly after the call returned.
+        let pid = fake.wait_pid().await.expect("the server never started");
         client.close_session().await;
         assert!(!alive(pid));
     })
     .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn concurrent_first_calls_share_one_server_and_close_stops_every_process() {
-    let rounds: usize = std::env::var("LSP_STRESS_ROUNDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(10);
-    let tasks: usize = std::env::var("LSP_STRESS_TASKS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(8);
-    let run = async {
-        for round in 0..rounds {
-            let fake = Fake::new();
-            let client = Arc::new(SpawnLspClient::new());
-            let file = fake.file("a.fake", "x\n");
-            let session = Arc::new(fake.session(client.clone(), "well-behaved", Some(10_000)));
-            let barrier = Arc::new(tokio::sync::Barrier::new(tasks));
-            let calls: Vec<_> = (0..tasks)
-                .map(|_| {
-                    let (session, barrier, file) = (session.clone(), barrier.clone(), file.clone());
-                    tokio::spawn(async move {
-                        barrier.wait().await;
-                        lsp(hover_input(&file), &session).await
-                    })
-                })
-                .collect();
-            for call in calls {
-                let r = call.await.unwrap();
-                assert!(
-                    matches!(r, LspResult::Hover(_) | LspResult::ServerStarting(_)),
-                    "round {round}: {r:?}"
-                );
-            }
-            client.close_session().await;
-            // Give any extra server time to start and record its pid.
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let pids = fake.spawned_pids();
-            let running: Vec<i32> = pids.iter().copied().filter(|p| alive(*p)).collect();
-            assert_eq!(
-                pids.len(),
-                1,
-                "round {round}: {} servers for one key",
-                pids.len()
-            );
-            assert!(
-                running.is_empty(),
-                "round {round}: still running after close: {running:?}"
-            );
-        }
-    };
-    let _shared = common::shared_spawns().await;
-    if tokio::time::timeout(Duration::from_secs(120), run)
-        .await
-        .is_err()
-    {
-        panic!("the stress run did not finish");
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

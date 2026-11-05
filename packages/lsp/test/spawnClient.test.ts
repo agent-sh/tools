@@ -36,11 +36,15 @@ type FakeMode =
   | "slow-initialize"
   | "slow-die-on-initialize";
 
+// A mode that also starts a child: one that ignores SIGTERM, or one that
+// exits on it.
+type FakeModeWithChild = `${FakeMode}-with-child` | `${FakeMode}-with-sigterm-child`;
+
 // Cases that hung before their fix get a short limit, so a regression fails
 // fast instead of at the 30s default.
 const HANG_LIMIT_MS = 10_000;
 
-function fakeProfile(mode: FakeMode, stateDir: string): LspServerProfile {
+function fakeProfile(mode: FakeMode | FakeModeWithChild, stateDir: string): LspServerProfile {
   return {
     language: "fake",
     extensions: [".fake"],
@@ -50,6 +54,22 @@ function fakeProfile(mode: FakeMode, stateDir: string): LspServerProfile {
 
 function serverPid(stateDir: string): number {
   return Number(readFileSync(path.join(stateDir, "pid"), "utf8"));
+}
+
+/** The pid of the server's child, once the server has started it. */
+async function childPid(stateDir: string): Promise<number> {
+  const file = path.join(stateDir, "child-pid");
+  await expect.poll(() => existsSync(file), { timeout: 5_000 }).toBe(true);
+  return Number(readFileSync(file, "utf8"));
+}
+
+async function goneWithin(pid: number, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (isAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await settle(20);
+  }
+  return true;
 }
 
 function isAlive(pid: number): boolean {
@@ -175,6 +195,60 @@ describe("spawn client: closeSession", () => {
     expect(unhandled).toEqual([]);
     expect(aliveAfterClose).toBe(false);
   }, 10_000);
+
+  it("takes the server's children when the server exits on `exit`", async () => {
+    const client = createSpawnLspClient();
+    // Exits on `exit`; its child ignores SIGTERM and never exits.
+    await client.ensureServer({
+      language: "fake",
+      root,
+      profile: fakeProfile("well-behaved-with-child", root),
+    });
+    const child = await childPid(root);
+
+    await client.closeSession();
+
+    expect(existsSync(path.join(root, "exit"))).toBe(true);
+    expect(await goneWithin(child, 1_000)).toBe(true);
+  });
+
+  it("sends SIGTERM to the server's whole process group", async () => {
+    const client = createSpawnLspClient();
+    // The server ignores `exit` and SIGTERM; its child exits on SIGTERM.
+    await client.ensureServer({
+      language: "fake",
+      root,
+      profile: fakeProfile("stubborn-with-sigterm-child", root),
+    });
+    const pid = serverPid(root);
+    const child = await childPid(root);
+
+    await client.closeSession();
+
+    // The server outlives the SIGTERM step, so it saw how its child ended.
+    // Without a group signal the child would end only after the server,
+    // from the kill after the exit.
+    expect(readFileSync(path.join(root, "child-exit"), "utf8")).toBe("SIGTERM");
+    expect(isAlive(pid)).toBe(false);
+    expect(await goneWithin(child, 1_000)).toBe(true);
+  }, 15_000);
+
+  it("takes the server's children with the final SIGKILL", async () => {
+    const client = createSpawnLspClient();
+    // Ignores `exit` and SIGTERM, and so does its child.
+    await client.ensureServer({
+      language: "fake",
+      root,
+      profile: fakeProfile("stubborn-with-child", root),
+    });
+    const pid = serverPid(root);
+    const child = await childPid(root);
+
+    await client.closeSession();
+
+    expect(isAlive(pid)).toBe(false);
+    expect(await goneWithin(child, 1_000)).toBe(true);
+  }, 15_000);
 
   it("returns only after a server that needs SIGKILL is gone", async () => {
     const client = createSpawnLspClient();

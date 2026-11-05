@@ -51,7 +51,10 @@
 //                              exists; stays alive until signalled.
 //
 // Any MODE may end in `-with-child`: the server then starts a child process
-// that ignores SIGTERM and writes its pid to STATE_DIR/child-pid.
+// that ignores SIGTERM and writes its pid to STATE_DIR/child-pid. With
+// `-with-sigterm-child` instead, the child exits on SIGTERM. While the
+// server lives, it writes the signal or code its child exited with to
+// STATE_DIR/child-exit.
 //
 // Every mode appends its pid to STATE_DIR/spawns at startup, and the URI of
 // each `textDocument/didOpen` it reads to STATE_DIR/didopen.
@@ -62,16 +65,18 @@ import path from "node:path";
 
 const [requested = "well-behaved", stateDir] = process.argv.slice(2);
 if (!stateDir) throw new Error("usage: fake-lsp-server.mjs MODE STATE_DIR");
-const withChild = requested.endsWith("-with-child");
-const mode = withChild ? requested.slice(0, -"-with-child".length) : requested;
+const childSuffix = ["-with-child", "-with-sigterm-child"].find((s) => requested.endsWith(s));
+const mode = childSuffix ? requested.slice(0, -childSuffix.length) : requested;
 
-if (withChild) {
-  const child = spawn(
-    process.execPath,
-    ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 60000);"],
-    { stdio: "ignore" },
-  );
+if (childSuffix) {
+  const ignoreTerm = childSuffix === "-with-child" ? "process.on('SIGTERM', () => {}); " : "";
+  const child = spawn(process.execPath, ["-e", `${ignoreTerm}setInterval(() => {}, 60000);`], {
+    stdio: "ignore",
+  });
   writeFileSync(path.join(stateDir, "child-pid"), String(child.pid));
+  child.on("exit", (code, signal) => {
+    writeFileSync(path.join(stateDir, "child-exit"), String(signal ?? code));
+  });
 }
 
 // Larger than any pipe or socket buffer, so the write only completes if the

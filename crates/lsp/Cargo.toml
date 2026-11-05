@@ -27,7 +27,7 @@ async-trait = "0.1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util", "process", "fs", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util", "process", "fs", "sync", "time", "signal"] }
 url = "2"
 lsp-types = "0.97"
 

@@ -38,11 +38,6 @@ pub async fn bounded<F: Future<Output = ()>>(test: F) {
     limit(test).await;
 }
 
-/// The shared hold `bounded` takes, for a test with its own limit.
-pub async fn shared_spawns() -> tokio::sync::RwLockReadGuard<'static, ()> {
-    SPAWNS.read().await
-}
-
 /// `bounded`, with no other test of this binary running meanwhile.
 pub async fn bounded_alone<F: Future<Output = ()>>(test: F) {
     let _alone = SPAWNS.write().await;
@@ -138,6 +133,53 @@ impl Fake {
             .trim()
             .parse()
             .unwrap()
+    }
+
+    /// The server's pid once it has written it, waiting up to 5s. None if
+    /// no server wrote one by then.
+    pub async fn wait_pid(&self) -> Option<i32> {
+        let file = Path::new(&self.root).join("pid");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pid) = fs::read_to_string(&file)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                return Some(pid);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Pids of the processes that run the fake server for this root,
+    /// whether or not node got as far as writing a pid, plus any server
+    /// that wrote one and is a zombie not yet reaped.
+    pub fn running(&self) -> Vec<i32> {
+        let mut found = Vec::new();
+        for p in fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Some(pid) = p.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else {
+                continue;
+            };
+            let cmdline = fs::read(p.path().join("cmdline")).unwrap_or_default();
+            let cmdline = String::from_utf8_lossy(&cmdline);
+            let zombie = fs::read_to_string(p.path().join("stat"))
+                .map(|s| {
+                    s.rsplit(')')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start()
+                        .starts_with('Z')
+                })
+                .unwrap_or(false);
+            let ours = cmdline.contains(FAKE_SERVER) && cmdline.contains(&self.root);
+            if ours || (zombie && self.spawned_pids().contains(&pid)) {
+                found.push(pid);
+            }
+        }
+        found
     }
 
     pub fn spawns(&self) -> usize {

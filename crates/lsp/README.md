@@ -26,6 +26,8 @@ let session = LspSessionConfig::new("/workspace", perms, client);
 let r = lsp(json!({ "operation": "hover", "path": "src/a.ts", "line": 5, "character": 10 }), &session).await;
 ```
 
+Call `close_session().await` (from the `LspClient` trait) on the client before the host exits, on SIGINT and SIGTERM too. On Unix each language server runs in its own process group, so a Ctrl-C in the host's terminal does not reach it. `harness-lsp-cli` does this itself.
+
 ## Contract
 
 The full contract lives in [`agent-knowledge/design/lsp.md`](https://github.com/agent-sh/tools/blob/main/agent-knowledge/design/lsp.md). Changes to this crate must stay in sync with that spec, and with the TypeScript sibling at [`@agent-sh/harness-lsp`](https://www.npmjs.com/package/@agent-sh/harness-lsp).

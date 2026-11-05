@@ -27,6 +27,8 @@ const session = {
 const r = await lsp({ operation: "definition", path: "src/a.ts", line: 5, character: 17 }, session);
 ```
 
+Call `session.client.closeSession()` before the host exits, on SIGINT and SIGTERM too. On POSIX each language server runs in its own process group, so a Ctrl-C in the host's terminal does not reach it.
+
 ## Contract
 
 The full contract — input shape, output discriminated-union, error codes, permission model, and acceptance tests — lives in [`agent-knowledge/design/lsp.md`](https://github.com/agent-sh/tools/blob/main/agent-knowledge/design/lsp.md). Changes to this package must stay in sync with that spec.

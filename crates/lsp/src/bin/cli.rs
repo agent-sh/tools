@@ -1,7 +1,7 @@
 //! `harness-lsp-cli` — JSON-RPC bridge. Method: lsp.
 
 use harness_core::{PermissionPolicy, ToolError, ToolErrorCode};
-use harness_lsp::{lsp, LspPermissionPolicy, LspSessionConfig, SpawnLspClient};
+use harness_lsp::{lsp, LspClient, LspPermissionPolicy, LspSessionConfig, SpawnLspClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -67,7 +67,9 @@ struct SessionSpec {
 fn client() -> Arc<SpawnLspClient> {
     use std::sync::OnceLock;
     static CLIENT: OnceLock<Arc<SpawnLspClient>> = OnceLock::new();
-    CLIENT.get_or_init(|| Arc::new(SpawnLspClient::new())).clone()
+    CLIENT
+        .get_or_init(|| Arc::new(SpawnLspClient::new()))
+        .clone()
 }
 
 impl SessionSpec {
@@ -75,8 +77,8 @@ impl SessionSpec {
         let mut perms = PermissionPolicy::new(self.roots);
         perms.sensitive_patterns = self.sensitive_patterns;
         perms.bypass_workspace_guard = self.bypass_workspace_guard;
-        let lsp_perms = LspPermissionPolicy::new(perms)
-            .with_unsafe_bypass(self.unsafe_allow_lsp_without_hook);
+        let lsp_perms =
+            LspPermissionPolicy::new(perms).with_unsafe_bypass(self.unsafe_allow_lsp_without_hook);
         let mut cfg = LspSessionConfig::new(self.cwd, lsp_perms, client());
         cfg.manifest = self.manifest;
         cfg.manifest_path = self.manifest_path;
@@ -91,6 +93,61 @@ impl SessionSpec {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    let (input, mut signal) = tokio::select! {
+        r = serve() => (r, None),
+        s = stop_signal() => (Ok(()), Some(s)),
+    };
+    // Each server runs in its own process group, so a signal sent to this
+    // process or its group never reaches it. Stop every server, and its
+    // children, before exiting. A second stop signal skips the wait.
+    let client = client();
+    let closing = client.close_session();
+    tokio::pin!(closing);
+    loop {
+        tokio::select! {
+            _ = &mut closing => break,
+            s = stop_signal() => {
+                if signal.is_some() {
+                    std::process::exit(128 + s);
+                }
+                signal = Some(s);
+            }
+        }
+    }
+    match signal {
+        Some(s) => std::process::exit(128 + s),
+        None => input,
+    }
+}
+
+/// Resolves with the signal number once SIGINT, SIGTERM or SIGHUP arrives.
+#[cfg(unix)]
+async fn stop_signal() -> i32 {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (Ok(mut int), Ok(mut term), Ok(mut hup)) = (
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = int.recv() => libc::SIGINT,
+        _ = term.recv() => libc::SIGTERM,
+        _ = hup.recv() => libc::SIGHUP,
+    }
+}
+
+/// Resolves once Ctrl-C arrives.
+#[cfg(not(unix))]
+async fn stop_signal() -> i32 {
+    if tokio::signal::ctrl_c().await.is_err() {
+        return std::future::pending().await;
+    }
+    2
+}
+
+async fn serve() -> std::io::Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin).lines();

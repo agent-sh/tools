@@ -125,6 +125,10 @@ struct ServerEntry {
     stderr: Arc<StdMutex<Vec<u8>>>,
     /// Stops of servers taken out of service, shared with the client.
     stops: Arc<StdMutex<Vec<JoinHandle<()>>>>,
+    /// Test record: whether the exited server was still unreaped when the
+    /// watcher killed its group.
+    #[cfg(test)]
+    unreaped_at_group_kill: StdMutex<Option<bool>>,
 }
 
 impl ServerEntry {
@@ -591,8 +595,103 @@ async fn stderr_loop<R: AsyncRead + Unpin>(
     let _ = eof.send(());
 }
 
+/// The process group a server leads (Unix). Dropping it kills the group,
+/// so a watcher dropped before it reaped its server, as on a runtime that
+/// shuts down without `close_session`, still takes the server's children.
+/// The watcher disarms it once it has reaped the server, since the group id
+/// is then free for another process to take.
+struct ServerGroup(Option<u32>);
+
+impl ServerGroup {
+    fn kill(&self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0 {
+            // SAFETY: kill(2) on the group our child leads. The child is
+            // not reaped yet (see `disarm`), so the group id is still ours.
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ServerGroup {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// A notice that fires once process `pid` has exited, without reaping it:
+/// until `child.wait()` reaps it, its pid and group id stay taken. It
+/// carries true once `waitid` saw the exit, false if `waitid` failed. None
+/// when the waiting thread could not start.
+#[cfg(unix)]
+fn exit_notice(pid: u32) -> Option<oneshot::Receiver<bool>> {
+    let (tx, rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("lsp-exit-wait".to_string())
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            let exited = loop {
+                // SAFETY: a zeroed siginfo_t is a valid out-parameter.
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                // SAFETY: waitid on our own child. WNOWAIT leaves it
+                // unreaped, so `child.wait()` still reaps it.
+                let r = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        pid as libc::id_t,
+                        &mut info,
+                        libc::WEXITED | libc::WNOWAIT,
+                    )
+                };
+                if r == 0 {
+                    break true;
+                }
+                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                    break false;
+                }
+            };
+            let _ = tx.send(exited);
+        })
+        .ok()?;
+    Some(rx)
+}
+
+/// Waits for the server to exit and reaps it. On Unix the exit is seen
+/// first without a reap, and what is left of the server's group is killed
+/// then, while the exited server still holds the group id. So no new
+/// process can have taken that id.
+async fn reap(
+    entry: &ServerEntry,
+    child: &mut Child,
+    notice: &mut Option<oneshot::Receiver<bool>>,
+    group: &ServerGroup,
+) -> Option<ExitStatus> {
+    if let Some(rx) = notice.as_mut() {
+        let exited = rx.await.unwrap_or(false);
+        *notice = None;
+        if exited {
+            #[cfg(test)]
+            if let Some(pid) = group.0 {
+                *entry.unreaped_at_group_kill.lock().unwrap() =
+                    Some(Path::new(&format!("/proc/{pid}")).exists());
+            }
+            group.kill();
+        }
+    }
+    let _ = entry;
+    child.wait().await.ok()
+}
+
 /// Watches the process: delivers signals, and when it exits reports the
-/// exit to every call still waiting on it.
+/// exit to every call still waiting on it. The server's children go with
+/// it, whether it exited on its own, on `exit`, or on a signal some child
+/// ignored.
 async fn watch_process(
     entry: Arc<ServerEntry>,
     mut child: Child,
@@ -600,26 +699,23 @@ async fn watch_process(
     stderr_eof: oneshot::Receiver<()>,
 ) {
     #[cfg(unix)]
-    let group = child.id();
+    let mut group = ServerGroup(child.id());
+    #[cfg(not(unix))]
+    let mut group = ServerGroup(None);
+    #[cfg(unix)]
+    let mut notice = child.id().and_then(exit_notice);
+    #[cfg(not(unix))]
+    let mut notice: Option<oneshot::Receiver<bool>> = None;
     let status = loop {
         tokio::select! {
-            s = child.wait() => break s.ok(),
+            s = reap(&entry, &mut child, &mut notice, &group) => break s,
             Some(k) = kills.recv() => match k {
                 KillSignal::Term => signal_server(&mut child, false),
                 KillSignal::Kill => signal_server(&mut child, true),
             },
         }
     };
-    // The server is gone; its children go with it, whether it exited on
-    // its own, on `exit`, or on a signal some child ignored.
-    #[cfg(unix)]
-    if let Some(pid) = group {
-        // SAFETY: kill(2) on the process group the server led, right after
-        // it was reaped. Any member left still holds the group id.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
+    group.disarm();
     entry.exited.send_replace(true);
     {
         let mut st = entry.status.lock().unwrap();
@@ -890,13 +986,37 @@ pub struct SpawnLspClient {
     /// the readiness check.
     #[cfg(test)]
     exit_before_ready_check: bool,
-    /// Test hook: block the spawn of this language for this long, as an
-    /// exec on a hung mount would, and notify once it begins.
+    /// Test hook: block every spawn of this language for this long, as an
+    /// exec on a hung mount would, and add a permit once each begins.
     #[cfg(test)]
-    slow_spawn: Option<(String, Duration, Arc<tokio::sync::Notify>)>,
+    slow_spawn: Option<(String, Duration, Arc<tokio::sync::Semaphore>)>,
+    /// Test hook: the next spawn panics.
+    #[cfg(test)]
+    panic_spawn: std::sync::atomic::AtomicBool,
     /// Test record: the pid of every server spawned.
     #[cfg(test)]
     spawned: StdMutex<Vec<u32>>,
+}
+
+/// Removes a `Spawning` placeholder that is still there when dropped, so a
+/// spawn that panics does not leave its key `server_starting` until
+/// `close_session`. On every other path the placeholder is gone by then.
+struct Unclaim<'a> {
+    servers: &'a StdMutex<HashMap<String, Slot>>,
+    key: String,
+    claim: i64,
+}
+
+impl Drop for Unclaim<'_> {
+    fn drop(&mut self) {
+        let mut servers = match self.servers.lock() {
+            Ok(servers) => servers,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if matches!(servers.get(&self.key), Some(Slot::Spawning(c, _)) if *c == self.claim) {
+            servers.remove(&self.key);
+        }
+    }
 }
 
 impl SpawnLspClient {
@@ -918,6 +1038,8 @@ impl SpawnLspClient {
             exit_before_ready_check: false,
             #[cfg(test)]
             slow_spawn: None,
+            #[cfg(test)]
+            panic_spawn: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             spawned: StdMutex::new(Vec::new()),
         }
@@ -945,9 +1067,13 @@ impl SpawnLspClient {
         #[cfg(test)]
         if let Some((slow, pause, began)) = &self.slow_spawn {
             if slow == language {
-                began.notify_one();
+                began.add_permits(1);
                 std::thread::sleep(*pause);
             }
+        }
+        #[cfg(test)]
+        if self.panic_spawn.swap(false, Ordering::SeqCst) {
+            panic!("test hook: the spawn panics");
         }
         let mut cmd = Command::new(&cmd_str);
         cmd.args(&args)
@@ -996,6 +1122,8 @@ impl SpawnLspClient {
             opened: StdMutex::new(HashMap::new()),
             stderr: Arc::new(StdMutex::new(Vec::new())),
             stops: Arc::clone(&self.stops),
+            #[cfg(test)]
+            unreaped_at_group_kill: StdMutex::new(None),
         });
 
         let (stderr_eof_tx, stderr_eof_rx) = oneshot::channel();
@@ -1249,6 +1377,11 @@ impl LspClient for SpawnLspClient {
             (claim, handled)
         };
         let (claim, handled) = claim;
+        let unclaim = Unclaim {
+            servers: &self.servers,
+            key: key.clone(),
+            claim,
+        };
         let spawned = self.spawn_server(language, root, profile);
         let (entry, mut started) = {
             // Dropped at the end of this block, which tells a waiting
@@ -1280,6 +1413,7 @@ impl LspClient for SpawnLspClient {
                 }
             }
         };
+        drop(unclaim);
         // An abort releases the caller only. The handshake goes on, bounded
         // by the initialize limit, and the next call finds the server
         // starting or ready, or is told why the start failed.
@@ -1421,10 +1555,12 @@ impl LspClient for SpawnLspClient {
             entry.begin_stop();
         }
         // A spawn in flight finds its placeholder gone and stops its
-        // server. Wait, up to one stop step, until that stop is begun, so
-        // the loop below waits for it too.
+        // server. Wait until each such stop is begun, so the loop below
+        // waits for it too: one stop step for all of them, as they run in
+        // parallel.
+        let deadline = tokio::time::Instant::now() + STOP_STEP;
         for mut handled in spawning {
-            let _ = tokio::time::timeout(STOP_STEP, handled.changed()).await;
+            let _ = tokio::time::timeout_at(deadline, handled.changed()).await;
         }
         loop {
             let stops: Vec<JoinHandle<()>> = std::mem::take(&mut *self.stops.lock().unwrap());
@@ -1634,6 +1770,33 @@ mod tests {
         true
     }
 
+    fn temp_root() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        (dir, root)
+    }
+
+    fn fake_session(
+        client: Arc<SpawnLspClient>,
+        root: &str,
+        mode: &str,
+        timeout_ms: u64,
+    ) -> crate::LspSessionConfig {
+        let perms = harness_core::PermissionPolicy::new([root.to_string()]);
+        let lsp_perms = crate::LspPermissionPolicy::new(perms).with_unsafe_bypass(true);
+        let mut cfg = crate::LspSessionConfig::new(root.to_string(), lsp_perms, client);
+        let mut servers = HashMap::new();
+        servers.insert("fake".to_string(), fake_profile(mode, root));
+        cfg.manifest = Some(crate::LspManifest { servers });
+        cfg.default_timeout_ms = Some(timeout_ms);
+        cfg
+    }
+
     fn read_pid(root: &str, name: &str) -> i32 {
         std::fs::read_to_string(Path::new(root).join(name))
             .unwrap()
@@ -1658,13 +1821,13 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let began = Arc::new(tokio::sync::Notify::new());
+        let began = Arc::new(tokio::sync::Semaphore::new(0));
         let mut client = SpawnLspClient::new();
-        // The `slow` spawn blocks its thread for 3s, as an exec on a hung
+        // The `slow` spawn blocks its thread for 6s, as an exec on a hung
         // mount would.
         client.slow_spawn = Some((
             "slow".to_string(),
-            Duration::from_secs(3),
+            Duration::from_secs(6),
             Arc::clone(&began),
         ));
         let client = Arc::new(client);
@@ -1678,7 +1841,7 @@ mod tests {
                 client.ensure_server("slow", &root, &profile, rx).await
             })
         };
-        began.notified().await;
+        began.acquire().await.unwrap().forget();
         let fast = {
             let client = Arc::clone(&client);
             let profile = fake_profile("well-behaved", &fast_root);
@@ -1688,7 +1851,7 @@ mod tests {
                 client.ensure_server("fake", &root, &profile, rx).await
             })
         };
-        let fast = tokio::time::timeout(Duration::from_millis(2_000), fast)
+        let fast = tokio::time::timeout(Duration::from_secs(4), fast)
             .await
             .expect("another key waited for the slow spawn")
             .unwrap();
@@ -1775,7 +1938,7 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let began = Arc::new(tokio::sync::Notify::new());
+        let began = Arc::new(tokio::sync::Semaphore::new(0));
         let mut client = SpawnLspClient::new();
         // The spawn blocks its thread for 500ms before the exec.
         client.slow_spawn = Some((
@@ -1793,17 +1956,61 @@ mod tests {
                 client.ensure_server("fake", &root, &profile, rx).await
             })
         };
-        began.notified().await;
+        began.acquire().await.unwrap().forget();
+        let closing = tokio::time::Instant::now();
         client.close_session().await;
-        // close_session returns only after the spawn it raced is stopped.
-        let spawned = client.spawned.lock().unwrap().clone();
-        assert_eq!(
-            spawned.len(),
-            1,
-            "close_session returned before the spawn ended"
-        );
-        assert!(!alive(spawned[0] as i32), "a server outlived close_session");
+        let took = closing.elapsed();
+        // close_session returns only after the spawn it raced is stopped,
+        // unless that takes a whole stop step, as only a starved machine
+        // makes this one take: then it stops waiting, so a hung exec cannot
+        // hold it.
+        if took < STOP_STEP {
+            let spawned = client.spawned.lock().unwrap().clone();
+            assert_eq!(
+                spawned.len(),
+                1,
+                "close_session returned before the spawn ended"
+            );
+            assert!(!alive(spawned[0] as i32), "a server outlived close_session");
+        }
         assert!(call.await.unwrap().is_err());
+        // Either way the spawn stops its server, and a close waits for it.
+        client.close_session().await;
+        let spawned = client.spawned.lock().unwrap().clone();
+        assert_eq!(spawned.len(), 1);
+        assert!(!alive(spawned[0] as i32), "a server outlived close_session");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn close_session_sends_sigterm_to_the_server_s_whole_group() {
+        let (_dir, root) = temp_root();
+        let client = Arc::new(SpawnLspClient::new());
+        let (_tx, rx) = watch::channel(false);
+        // The server ignores `exit` and SIGTERM; its child exits on SIGTERM.
+        client
+            .ensure_server(
+                "fake",
+                &root,
+                &fake_profile("stubborn-with-sigterm-child", &root),
+                rx,
+            )
+            .await
+            .unwrap();
+        let server = read_pid(&root, "pid");
+        wait_for_file(&Path::new(&root).join("child-pid")).await;
+        let child = read_pid(&root, "child-pid");
+        client.close_session().await;
+        // The server outlives the SIGTERM step, so it saw how its child
+        // ended. Without a group signal the child would end only after the
+        // server, from the kill after the exit.
+        let ended = std::fs::read_to_string(Path::new(&root).join("child-exit"))
+            .expect("the child did not end while the server lived");
+        assert_eq!(ended, "SIGTERM");
+        assert!(!alive(server), "the server is still running");
+        assert!(
+            gone_within(child, Duration::from_millis(1_000)).await,
+            "the server's child is still running"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1836,5 +2043,222 @@ mod tests {
             gone_within(child, Duration::from_millis(1_000)).await,
             "the server's child is still running"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+    async fn close_session_bounds_all_spawns_in_flight_together() {
+        let roots: Vec<_> = (0..3).map(|_| temp_root()).collect();
+        let began = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut client = SpawnLspClient::new();
+        // Each spawn blocks its thread for 6s, as an exec on a hung mount
+        // would: three stop steps.
+        client.slow_spawn = Some((
+            "fake".to_string(),
+            Duration::from_secs(6),
+            Arc::clone(&began),
+        ));
+        let client = Arc::new(client);
+        let calls: Vec<_> = roots
+            .iter()
+            .map(|(_, root)| {
+                let client = Arc::clone(&client);
+                let profile = fake_profile("well-behaved", root);
+                let root = root.clone();
+                tokio::spawn(async move {
+                    let (_tx, rx) = watch::channel(false);
+                    client.ensure_server("fake", &root, &profile, rx).await
+                })
+            })
+            .collect();
+        began.acquire_many(3).await.unwrap().forget();
+        let closing = tokio::time::Instant::now();
+        client.close_session().await;
+        let took = closing.elapsed();
+        // One stop step for all three, not one each (6s).
+        assert!(
+            took < Duration::from_secs(4),
+            "close_session took {took:?} for three spawns in flight"
+        );
+        for call in calls {
+            assert!(call.await.unwrap().is_err());
+        }
+        // The spawns that lost their slots stop their servers; this close
+        // waits for those stops.
+        client.close_session().await;
+        let spawned = client.spawned.lock().unwrap().clone();
+        assert_eq!(spawned.len(), 3);
+        for pid in spawned {
+            assert!(!alive(pid as i32), "a server outlived close_session");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_group_is_killed_before_the_server_is_reaped() {
+        let (_dir, root) = temp_root();
+        let client = SpawnLspClient::new();
+        let (_tx, rx) = watch::channel(false);
+        // Exits on `exit`; its child ignores SIGTERM and never exits.
+        client
+            .ensure_server(
+                "fake",
+                &root,
+                &fake_profile("well-behaved-with-child", &root),
+                rx,
+            )
+            .await
+            .unwrap();
+        let entry = server_entry(&client, &root);
+        wait_for_file(&Path::new(&root).join("child-pid")).await;
+        let child = read_pid(&root, "child-pid");
+        client.close_session().await;
+        assert_eq!(
+            *entry.unreaped_at_group_kill.lock().unwrap(),
+            Some(true),
+            "the group was killed after the server was reaped, when its id may be taken"
+        );
+        assert!(
+            gone_within(child, Duration::from_millis(1_000)).await,
+            "the server's child is still running"
+        );
+    }
+
+    #[test]
+    fn a_runtime_dropped_without_close_session_kills_each_server_s_group() {
+        let (_dir, root) = temp_root();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = runtime.block_on(async {
+            let client = SpawnLspClient::new();
+            let (_tx, rx) = watch::channel(false);
+            client
+                .ensure_server(
+                    "fake",
+                    &root,
+                    &fake_profile("well-behaved-with-child", &root),
+                    rx,
+                )
+                .await
+                .unwrap();
+            wait_for_file(&Path::new(&root).join("child-pid")).await;
+            client
+        });
+        let child = read_pid(&root, "child-pid");
+        // A host that keeps its client for the life of the process, in a
+        // static, and exits without `close_session`.
+        std::mem::forget(client);
+        drop(runtime);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while alive(child) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(child), "the server's child outlived the runtime");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_spawn_that_panics_does_not_leave_its_key_starting() {
+        let (_dir, root) = temp_root();
+        let client = Arc::new(SpawnLspClient::new());
+        client.panic_spawn.store(true, Ordering::SeqCst);
+        let panicked = {
+            let client = Arc::clone(&client);
+            let profile = fake_profile("well-behaved", &root);
+            let root = root.clone();
+            tokio::spawn(async move {
+                let (_tx, rx) = watch::channel(false);
+                client.ensure_server("fake", &root, &profile, rx).await
+            })
+        };
+        assert!(panicked.await.unwrap_err().is_panic());
+        let (_tx, rx) = watch::channel(false);
+        let next = client
+            .ensure_server("fake", &root, &fake_profile("well-behaved", &root), rx)
+            .await
+            .unwrap();
+        assert_eq!(
+            next.state,
+            ServerState::Ready,
+            "the key stayed starting after the spawn panicked"
+        );
+        client.close_session().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_first_calls_share_one_server_and_close_stops_every_process() {
+        let rounds: usize = std::env::var("LSP_STRESS_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let tasks: usize = std::env::var("LSP_STRESS_TASKS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+        let run = async {
+            for round in 0..rounds {
+                let (_dir, root) = temp_root();
+                let file = Path::new(&root).join("a.fake");
+                std::fs::write(&file, "x\n").unwrap();
+                let file = file.to_string_lossy().into_owned();
+                let client = Arc::new(SpawnLspClient::new());
+                let session = Arc::new(fake_session(
+                    Arc::clone(&client),
+                    &root,
+                    "well-behaved",
+                    10_000,
+                ));
+                let barrier = Arc::new(tokio::sync::Barrier::new(tasks));
+                let calls: Vec<_> = (0..tasks)
+                    .map(|_| {
+                        let (session, barrier, file) =
+                            (Arc::clone(&session), Arc::clone(&barrier), file.clone());
+                        tokio::spawn(async move {
+                            barrier.wait().await;
+                            let input = serde_json::json!({
+                                "operation": "hover",
+                                "path": file,
+                                "line": 1,
+                                "character": 1,
+                            });
+                            crate::lsp(input, &session).await
+                        })
+                    })
+                    .collect();
+                for call in calls {
+                    let r = call.await.unwrap();
+                    assert!(
+                        matches!(
+                            r,
+                            crate::LspResult::Hover(_) | crate::LspResult::ServerStarting(_)
+                        ),
+                        "round {round}: {r:?}"
+                    );
+                }
+                client.close_session().await;
+                // The client's own record: every spawn, slow or not.
+                let spawned = client.spawned.lock().unwrap().clone();
+                assert_eq!(
+                    spawned.len(),
+                    1,
+                    "round {round}: {} servers for one key",
+                    spawned.len()
+                );
+                let running: Vec<u32> = spawned
+                    .iter()
+                    .copied()
+                    .filter(|p| alive(*p as i32))
+                    .collect();
+                assert!(
+                    running.is_empty(),
+                    "round {round}: still running after close: {running:?}"
+                );
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(120), run)
+            .await
+            .is_err()
+        {
+            panic!("the stress run did not finish");
+        }
     }
 }
