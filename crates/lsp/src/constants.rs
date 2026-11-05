@@ -1,6 +1,11 @@
 pub const DEFAULT_HEAD_LIMIT: usize = 200;
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const SESSION_BACKSTOP_MS: u64 = 60_000;
+/// Default bound for the spawn client's `initialize` handshake. It is the
+/// session backstop, which also caps every call's budget, so with the
+/// defaults a start outlives the call that began it. Keep it above the
+/// session's call budget (design spec section 5.3).
+pub const DEFAULT_INITIALIZE_TIMEOUT_MS: u64 = SESSION_BACKSTOP_MS;
 pub const SERVER_STARTUP_MAX_WAIT_MS: u64 = 5_000;
 pub const MAX_HOVER_MARKDOWN_BYTES: usize = 10_000;
 pub const MAX_PREVIEW_LINE_LENGTH: usize = 200;

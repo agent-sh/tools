@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::types::{
-    CancelSignal, LspClient, LspHoverResult, LspLocation, LspServerProfile, LspSymbolInfo,
-    Position1, ServerHandle, ServerState,
+    CancelSignal, LspClient, LspClientError, LspHoverResult, LspLocation, LspServerProfile,
+    LspSymbolInfo, Position1, ServerHandle, ServerState,
 };
 
 pub type HoverResponder = Arc<
@@ -56,30 +56,30 @@ impl StubLspClient {
         *self.closed.lock().unwrap()
     }
 
-    fn maybe_throw(&self, language: &str, op: &str) -> Result<(), String> {
+    fn maybe_throw(&self, language: &str, op: &str) -> Result<(), LspClientError> {
         if let Some((l_opt, op_opt, err_msg)) = &self.behavior.throw_on {
             let l_match = l_opt.as_deref().map(|l| l == language).unwrap_or(true);
             let op_match = op_opt.as_deref().map(|o| o == op).unwrap_or(true);
             if l_match && op_match {
-                return Err(err_msg.clone());
+                return Err(LspClientError::Other(err_msg.clone()));
             }
         }
         Ok(())
     }
 
-    async fn maybe_hang(&self, op: &str, cancel: &CancelSignal) -> Result<(), String> {
+    async fn maybe_hang(&self, op: &str, cancel: &CancelSignal) -> Result<(), LspClientError> {
         if let Some(hang_op) = &self.behavior.hang_on {
             if hang_op == op {
                 let mut rx = cancel.clone();
                 loop {
                     if *rx.borrow() {
-                        return Err("aborted".to_string());
+                        return Err(LspClientError::Aborted);
                     }
                     if rx.changed().await.is_err() {
-                        return Err("aborted".to_string());
+                        return Err(LspClientError::Aborted);
                     }
                     if *rx.borrow() {
-                        return Err("aborted".to_string());
+                        return Err(LspClientError::Aborted);
                     }
                 }
             }
@@ -95,7 +95,8 @@ impl LspClient for StubLspClient {
         language: &str,
         root: &str,
         _profile: &LspServerProfile,
-    ) -> Result<ServerHandle, String> {
+        _cancel: CancelSignal,
+    ) -> Result<ServerHandle, LspClientError> {
         let key = format!("{}|{}", language, root);
         let mut counts = self.call_counts.lock().unwrap();
         let next = counts.get(&key).copied().unwrap_or(0) + 1;
@@ -118,7 +119,7 @@ impl LspClient for StubLspClient {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Option<LspHoverResult>, String> {
+    ) -> Result<Option<LspHoverResult>, LspClientError> {
         self.maybe_throw(&handle.language, "hover")?;
         self.maybe_hang("hover", &cancel).await?;
         Ok(self
@@ -135,7 +136,7 @@ impl LspClient for StubLspClient {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspLocation>, String> {
+    ) -> Result<Vec<LspLocation>, LspClientError> {
         self.maybe_throw(&handle.language, "definition")?;
         self.maybe_hang("definition", &cancel).await?;
         Ok(self
@@ -153,7 +154,7 @@ impl LspClient for StubLspClient {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspLocation>, String> {
+    ) -> Result<Vec<LspLocation>, LspClientError> {
         self.maybe_throw(&handle.language, "references")?;
         self.maybe_hang("references", &cancel).await?;
         Ok(self
@@ -170,7 +171,7 @@ impl LspClient for StubLspClient {
         handle: &ServerHandle,
         path: &str,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspSymbolInfo>, String> {
+    ) -> Result<Vec<LspSymbolInfo>, LspClientError> {
         self.maybe_throw(&handle.language, "documentSymbol")?;
         self.maybe_hang("documentSymbol", &cancel).await?;
         Ok(self
@@ -187,7 +188,7 @@ impl LspClient for StubLspClient {
         handle: &ServerHandle,
         query: &str,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspSymbolInfo>, String> {
+    ) -> Result<Vec<LspSymbolInfo>, LspClientError> {
         self.maybe_throw(&handle.language, "workspaceSymbol")?;
         self.maybe_hang("workspaceSymbol", &cancel).await?;
         Ok(self
@@ -205,7 +206,7 @@ impl LspClient for StubLspClient {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspLocation>, String> {
+    ) -> Result<Vec<LspLocation>, LspClientError> {
         self.maybe_throw(&handle.language, "implementation")?;
         self.maybe_hang("implementation", &cancel).await?;
         Ok(self

@@ -27,10 +27,10 @@ pub use schema::{
     safe_parse_lsp_params, validate_per_op, LspParams, LspParseError, LspValidateResult,
     LSP_TOOL_DESCRIPTION, LSP_TOOL_NAME,
 };
-pub use spawn_client::SpawnLspClient;
+pub use spawn_client::{SpawnLspClient, SpawnLspClientOptions};
 pub use stub_client::{StubBehavior, StubLspClient, StubResponses};
 pub use types::{
-    LspClient, LspDefinitionOk, LspDocumentSymbolOk, LspError, LspHoverOk, LspHoverResult,
+    CancelSignal, LspClient, LspClientError, LspDefinitionOk, LspDocumentSymbolOk, LspError, LspHoverOk, LspHoverResult,
     LspImplementationOk, LspLocation, LspManifest, LspNoResults, LspOperation,
     LspPermissionPolicy, LspReferencesOk, LspResult, LspServerProfile, LspServerStarting,
     LspSessionConfig, LspSymbolInfo, LspWorkspaceSymbolOk, Position1, ServerHandle, ServerState,

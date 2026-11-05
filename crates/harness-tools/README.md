@@ -8,7 +8,7 @@ Rust port of [`@agent-sh/harness-tools`](https://www.npmjs.com/package/@agent-sh
 
 ```toml
 [dependencies]
-harness-tools = "0.5"
+harness-tools = "0.6"
 ```
 
 ## Usage

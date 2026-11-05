@@ -98,14 +98,56 @@ pub struct LspHoverResult {
 /// When `*rx.borrow()` is true, the operation should abort.
 pub type CancelSignal = watch::Receiver<bool>;
 
+/// Why an `LspClient` call failed. The `lsp` tool maps each kind to its
+/// error code (design spec sections 3.9 and 5.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LspClientError {
+    /// The server died, or lost a pipe, while the call used it. The tool
+    /// reports `SERVER_CRASHED`; the next call starts a new server. The
+    /// message says what happened and carries the server's stderr tail.
+    Crashed(String),
+    /// The call's cancel signal fired first.
+    Aborted,
+    /// Anything else: a failed start, an error reply, a protocol error.
+    Other(String),
+}
+
+impl std::fmt::Display for LspClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Crashed(m) | Self::Other(m) => f.write_str(m),
+            Self::Aborted => f.write_str("aborted"),
+        }
+    }
+}
+
+impl std::error::Error for LspClientError {}
+
+impl From<String> for LspClientError {
+    fn from(m: String) -> Self {
+        Self::Other(m)
+    }
+}
+
+impl From<&str> for LspClientError {
+    fn from(m: &str) -> Self {
+        Self::Other(m.to_string())
+    }
+}
+
 #[async_trait]
 pub trait LspClient: Send + Sync {
+    /// Start or reuse the server for (language, root). `cancel` bounds the
+    /// caller's wait: a server still starting when it fires keeps starting,
+    /// and a later call gets it as `Starting` or `Ready`. A call whose
+    /// signal already fired starts nothing.
     async fn ensure_server(
         &self,
         language: &str,
         root: &str,
         profile: &LspServerProfile,
-    ) -> Result<ServerHandle, String>;
+        cancel: CancelSignal,
+    ) -> Result<ServerHandle, LspClientError>;
 
     async fn hover(
         &self,
@@ -113,7 +155,7 @@ pub trait LspClient: Send + Sync {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Option<LspHoverResult>, String>;
+    ) -> Result<Option<LspHoverResult>, LspClientError>;
 
     async fn definition(
         &self,
@@ -121,7 +163,7 @@ pub trait LspClient: Send + Sync {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspLocation>, String>;
+    ) -> Result<Vec<LspLocation>, LspClientError>;
 
     async fn references(
         &self,
@@ -129,21 +171,21 @@ pub trait LspClient: Send + Sync {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspLocation>, String>;
+    ) -> Result<Vec<LspLocation>, LspClientError>;
 
     async fn document_symbol(
         &self,
         handle: &ServerHandle,
         path: &str,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspSymbolInfo>, String>;
+    ) -> Result<Vec<LspSymbolInfo>, LspClientError>;
 
     async fn workspace_symbol(
         &self,
         handle: &ServerHandle,
         query: &str,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspSymbolInfo>, String>;
+    ) -> Result<Vec<LspSymbolInfo>, LspClientError>;
 
     async fn implementation(
         &self,
@@ -151,7 +193,7 @@ pub trait LspClient: Send + Sync {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspLocation>, String>;
+    ) -> Result<Vec<LspLocation>, LspClientError>;
 
     async fn close_session(&self);
 }
@@ -201,6 +243,10 @@ pub struct LspSessionConfig {
     pub server_startup_max_wait_ms: Option<u64>,
     pub max_hover_markdown_bytes: Option<usize>,
     pub max_preview_line_length: Option<usize>,
+    /// The caller's cancel signal. When it fires, the call ends with
+    /// `TIMEOUT` saying it was cancelled; a call whose signal already fired
+    /// sends nothing.
+    pub signal: Option<CancelSignal>,
     /// Retry counter for `server_starting` exponential backoff. Callers
     /// can share a Map across calls by holding the Arc themselves.
     pub retry_counter: Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
@@ -224,6 +270,7 @@ impl LspSessionConfig {
             server_startup_max_wait_ms: None,
             max_hover_markdown_bytes: None,
             max_preview_line_length: None,
+            signal: None,
             retry_counter: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }

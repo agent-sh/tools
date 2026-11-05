@@ -1,7 +1,7 @@
 # LSP Tool — Cross-Language Design Spec
 
 **Status**: Draft v1 — 2026-04-21
-**Implementations**: TypeScript (`@agent-sh/harness-lsp`), Rust (pending)
+**Implementations**: TypeScript (`@agent-sh/harness-lsp`), Rust (`harness-lsp` crate)
 **Scope**: Language-neutral contract. Implementation files (`packages/lsp/` for TS, `crates/lsp/` for Rust) must conform.
 
 This spec is the source of truth. Implementation-specific ergonomics are allowed; public semantics are not.
@@ -250,7 +250,7 @@ Hint is operation-specific:
 | `DEFAULT_HEAD_LIMIT` | 200 (references, workspaceSymbol) | per-call `head_limit` |
 | `DEFAULT_TIMEOUT_MS` | 30_000 (per-op) | session config |
 | `SERVER_STARTUP_MAX_WAIT_MS` | 5_000 (first-call lazy wait before returning `server_starting`) | session config |
-| `DEFAULT_INITIALIZE_TIMEOUT_MS` | 60_000 (`SESSION_BACKSTOP_MS`; bound for the spawn client's `initialize`) | `createSpawnLspClient({ initializeTimeoutMs })` |
+| `DEFAULT_INITIALIZE_TIMEOUT_MS` | 60_000 (`SESSION_BACKSTOP_MS`; bound for the spawn client's `initialize`) | `createSpawnLspClient({ initializeTimeoutMs })`; Rust `SpawnLspClient::with_options(SpawnLspClientOptions { initialize_timeout_ms })` |
 | `MAX_HOVER_MARKDOWN_BYTES` | 10_000 (prune massive TSDoc) | session config |
 | `MAX_PREVIEW_LINE_LENGTH` | 200 chars per preview line | session config |
 | `MAX_WORKSPACE_SYMBOLS_SCANNED` | 10_000 (internal scan cap) | session config |
@@ -308,7 +308,7 @@ The tool returns `server_starting` when (1) has happened but (2) hasn't. The cli
 - **Simple op (documentSymbol on a tiny file)** — usually works before indexing completes. Try it; fall back to `server_starting` if the server rejects.
 - **Full-index op (references, workspaceSymbol)** — block up to `SERVER_STARTUP_MAX_WAIT_MS` for indexing, then return `server_starting` with `retry_ms`.
 
-The handshake itself is bounded by `DEFAULT_INITIALIZE_TIMEOUT_MS`, the session backstop (60s, section 8); the spawn client takes `initializeTimeoutMs` to override it. The session backstop also caps every call's budget, so with the defaults a slow start outlives the call that began it: that call returns `TIMEOUT`, and a later call gets `server_starting` or a result from the same server. When the process exits, fails to spawn, breaks a pipe or answers `initialize` with an error, `ensureServer` rejects at once and the tool returns `SERVER_NOT_AVAILABLE` with the reason. When the bound passes, the client stops the server (SIGTERM, then SIGKILL after 2s). A start that fails after the call that began it has given up is reported once: the next call returns `SERVER_NOT_AVAILABLE` with the reason (the exit code or signal and the stderr tail, or the missed bound), and the call after it starts a new server. Keep the bound above the session's call budget; when the two are equal the call gives up first, and only the next call learns why the start failed.
+The handshake itself is bounded by `DEFAULT_INITIALIZE_TIMEOUT_MS`, the session backstop (60s, section 8); the spawn client takes `initializeTimeoutMs` (Rust: `initialize_timeout_ms`) to override it. The session backstop also caps every call's budget, so with the defaults a slow start outlives the call that began it: that call returns `TIMEOUT`, and a later call gets `server_starting` or a result from the same server. When the process exits, fails to spawn, breaks a pipe or answers `initialize` with an error, `ensureServer` rejects at once and the tool returns `SERVER_NOT_AVAILABLE` with the reason. When the bound passes, the client stops the server (SIGTERM, then SIGKILL after 2s). A start that fails after the call that began it has given up is reported once: the next call returns `SERVER_NOT_AVAILABLE` with the reason (the exit code or signal and the stderr tail, or the missed bound), and the call after it starts a new server. Keep the bound above the session's call budget; when the two are equal the call gives up first, and only the next call learns why the start failed.
 
 ### 5.4 Shutdown
 
@@ -320,9 +320,9 @@ The handshake itself is bounded by `DEFAULT_INITIALIZE_TIMEOUT_MS`, the session 
 
 - If a ready server exits while no call is using it, the next call's `ensureServer` starts a new one and that call proceeds. A server that exits while it is still starting in the background is reported first (5.3): the next call gets `SERVER_NOT_AVAILABLE` with the reason, and the call after it starts a new server. Until its start has failed, such a server counts as starting, so a call in between gets `server_starting`, not a second server. `ensureServer` never returns a crashed handle: `ServerHandle.state` is `starting` or `ready`.
 - A call that sees the server die gets `SERVER_CRASHED`, and the call after it starts a new server.
-- A request in flight when the process exits rejects at once with `LspServerExitedError` (exit code or signal, plus the server's last stderr output). It does not wait for the per-op timeout. The tool returns it as `SERVER_CRASHED` for that call.
+- A request in flight when the process exits rejects at once with `LspServerExitedError` (Rust: `LspClientError::Crashed`) (exit code or signal, plus the server's last stderr output). It does not wait for the per-op timeout. The tool returns it as `SERVER_CRASHED` for that call.
 - The client always drains the server's stderr, so a server that writes a lot of it never blocks on a full pipe. Only the last 4 KB is kept, for that error.
-- A server whose stdin breaks while the process lives can never take another message. The write that found it fails that call with `LspServerCrashedError` (`SERVER_CRASHED`), and the client marks the server crashed and stops it, so the next call starts a new one.
+- A server whose stdin breaks while the process lives can never take another message. The write that found it fails that call with `LspServerCrashedError` (Rust: `LspClientError::Crashed`; `SERVER_CRASHED`), and the client marks the server crashed and stops it, so the next call starts a new one.
 - A server whose stdout closes while the process lives can never answer again. It gets one stop step (2s) to exit on its own. If it does not, it is retired the same way, and every call waiting on it gets `SERVER_CRASHED`.
 - Deliberately don't auto-retry within the same call: the model gets to see the crash, decide whether the request was the cause (malformed position, etc.), and retry or not.
 

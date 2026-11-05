@@ -1,193 +1,691 @@
 //! Spawn-based LSP client. Talks LSP JSON-RPC over stdio to a child
-//! language-server. Framing: `Content-Length: N\r\n\r\n<body>`.
+//! language server. Framing: `Content-Length: N\r\n\r\n<body>`.
+//!
+//! The lifecycle follows `agent-knowledge/design/lsp.md`, sections 5.3 to
+//! 5.5 and 8, the same way the TypeScript spawn client does:
+//!
+//! - The start runs in its own task, bounded by the `initialize` limit. A
+//!   caller waits for it under its cancel signal; the start goes on when
+//!   the caller gives up, and a start that fails after that is reported
+//!   once, to the next call.
+//! - A task watches the process. When it exits, every call still waiting
+//!   on it fails at once with the exit code or signal and the stderr tail.
+//! - stderr is always drained; only its last bytes are kept.
+//! - A broken stdin, or a stdout that closes while the process lives,
+//!   takes the server out of service, so the next call starts a new one.
+//! - Writes go through one writer task, so a cancelled call never cuts a
+//!   message off midway, and nothing is written once the pipe is gone.
+//! - `close_session` stops every server in bounded steps: `shutdown`,
+//!   `exit`, SIGTERM, SIGKILL, and waits for each process to exit.
 
 use async_trait::async_trait;
-use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 use url::Url;
 
-use crate::constants::kind_name;
+use crate::constants::{kind_name, DEFAULT_INITIALIZE_TIMEOUT_MS};
 use crate::types::{
-    CancelSignal, LspClient, LspHoverResult, LspLocation, LspServerProfile, LspSymbolInfo,
-    Position1, ServerHandle, ServerState,
+    CancelSignal, LspClient, LspClientError, LspHoverResult, LspLocation, LspServerProfile,
+    LspSymbolInfo, Position1, ServerHandle, ServerState,
 };
+
+/// Bound for each step of stopping a server: the `shutdown` reply, the
+/// `exit` write, the exit after `exit`, and the exit after SIGTERM and
+/// after SIGKILL. Design spec section 5.4.
+const STOP_STEP: Duration = Duration::from_millis(2_000);
+
+/// Bytes of server stderr kept for the crash error. Enough for a typical
+/// Node stack trace or Rust panic message; the rest is read and dropped.
+const STDERR_TAIL_BYTES: usize = 4_096;
+
+/// After the process exits, how long to wait for its stderr to reach end
+/// of file, so the crash error carries what the server wrote last. What it
+/// wrote before exiting is already in the pipe; the wait only runs long
+/// when another process inherited the pipe.
+const STDERR_SETTLE: Duration = Duration::from_millis(100);
+
+/// Options for [`SpawnLspClient::with_options`].
+#[derive(Debug, Clone, Default)]
+pub struct SpawnLspClientOptions {
+    /// Bound for the `initialize` handshake, in ms. Defaults to
+    /// [`DEFAULT_INITIALIZE_TIMEOUT_MS`], the session backstop, so a start
+    /// can outlive the tool call that began it.
+    pub initialize_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryState {
+    Starting,
+    Ready,
+    Crashed,
+}
+
+impl EntryState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Crashed => "crashed",
+        }
+    }
+}
+
+struct Status {
+    state: EntryState,
+    /// Why the start failed, kept while no caller has seen it: the call
+    /// that began the start gave up before it ended. The next
+    /// `ensure_server` for this key reports it once.
+    unreported_start_error: Option<LspClientError>,
+    stopping: bool,
+}
+
+type Reply = Result<Value, LspClientError>;
+
+struct Rpc {
+    /// Set once the server can no longer serve calls: the error to report.
+    gone: Option<LspClientError>,
+    pending: HashMap<i64, oneshot::Sender<Reply>>,
+}
+
+struct WriteJob {
+    bytes: Vec<u8>,
+    done: oneshot::Sender<Result<(), String>>,
+}
+
+enum KillSignal {
+    Term,
+    Kill,
+}
+
+type OpenResult = Option<Result<(), LspClientError>>;
 
 struct ServerEntry {
     language: String,
     root: String,
-    state: Mutex<ServerState>,
-    stdin: Mutex<ChildStdin>,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>,
+    status: StdMutex<Status>,
+    rpc: StdMutex<Rpc>,
+    /// Flips to true when `rpc.gone` is set.
+    gone_flag: watch::Sender<bool>,
+    /// Flips to true once the process has exited.
+    exited: watch::Sender<bool>,
+    writer: StdMutex<Option<mpsc::UnboundedSender<WriteJob>>>,
+    kill: mpsc::UnboundedSender<KillSignal>,
     next_id: AtomicI64,
-    opened_files: Mutex<HashMap<String, bool>>,
-    _child: Mutex<Child>,
+    /// didOpen per path: in flight or done. A failed open is dropped.
+    opened: StdMutex<HashMap<String, watch::Receiver<OpenResult>>>,
+    stderr: Arc<StdMutex<Vec<u8>>>,
+    /// Stops of servers taken out of service, shared with the client.
+    stops: Arc<StdMutex<Vec<JoinHandle<()>>>>,
 }
 
 impl ServerEntry {
-    async fn handle(&self) -> ServerHandle {
+    fn handle(&self) -> ServerHandle {
         ServerHandle {
             language: self.language.clone(),
             root: self.root.clone(),
-            state: *self.state.lock().await,
-        }
-    }
-}
-
-pub struct SpawnLspClient {
-    servers: Mutex<HashMap<String, Arc<ServerEntry>>>,
-}
-
-impl SpawnLspClient {
-    pub fn new() -> Self {
-        Self {
-            servers: Mutex::new(HashMap::new()),
+            state: match self.status.lock().unwrap().state {
+                EntryState::Ready => ServerState::Ready,
+                _ => ServerState::Starting,
+            },
         }
     }
 
-    fn key(language: &str, root: &str) -> String {
-        format!("{}|{}", language, root)
+    fn running(&self) -> bool {
+        !*self.exited.borrow()
     }
-}
 
-impl Default for SpawnLspClient {
-    fn default() -> Self {
-        Self::new()
+    async fn wait_exited(&self) {
+        let mut rx = self.exited.subscribe();
+        let _ = rx.wait_for(|e| *e).await;
     }
-}
 
-async fn send_request(
-    entry: &ServerEntry,
-    method: &str,
-    params: Value,
-    cancel: CancelSignal,
-) -> Result<Value, String> {
-    let id = entry.next_id.fetch_add(1, Ordering::Relaxed);
-    let (tx, rx) = oneshot::channel();
-    {
-        let mut pending = entry.pending.lock().await;
-        pending.insert(id, tx);
+    fn stderr_tail(&self) -> String {
+        let buf = self.stderr.lock().unwrap();
+        String::from_utf8_lossy(&buf).trim().to_string()
     }
-    let msg = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": params,
-    });
-    write_message(entry, &msg).await?;
 
-    let mut cancel_rx = cancel.clone();
-    tokio::select! {
-        res = rx => res.map_err(|_| "request dropped".to_string())?,
-        _ = cancel_rx.changed() => {
-            if *cancel_rx.borrow() {
-                // Best-effort cancel notification.
-                let _ = write_message(entry, &serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "$/cancelRequest",
-                    "params": { "id": id },
-                })).await;
-                let mut pending = entry.pending.lock().await;
-                pending.remove(&id);
-                return Err("aborted".to_string());
+    fn crashed(&self, summary: String) -> LspClientError {
+        LspClientError::Crashed(crash_message(summary, &self.stderr_tail()))
+    }
+
+    fn gone_reason(&self) -> Option<LspClientError> {
+        self.rpc.lock().unwrap().gone.clone()
+    }
+
+    /// Mark the server unable to serve calls. Every call still waiting on a
+    /// reply fails with `reason`; later calls fail with it at once. Only
+    /// the first reason counts.
+    fn fire_gone(&self, reason: LspClientError) {
+        let pending = {
+            let mut rpc = self.rpc.lock().unwrap();
+            if rpc.gone.is_some() {
+                return;
             }
-            Err("cancel channel closed".to_string())
+            rpc.gone = Some(reason.clone());
+            std::mem::take(&mut rpc.pending)
+        };
+        for (_, tx) in pending {
+            let _ = tx.send(Err(reason.clone()));
+        }
+        self.gone_flag.send_replace(true);
+    }
+
+    async fn wait_gone(&self) -> LspClientError {
+        let mut rx = self.gone_flag.subscribe();
+        let _ = rx.wait_for(|g| *g).await;
+        self.gone_reason()
+            .unwrap_or_else(|| LspClientError::Other("language server is gone".to_string()))
+    }
+
+    /// Queue one message for the writer task and wait until it is written.
+    async fn write(&self, msg: &Value) -> Result<(), String> {
+        let body = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
+        let mut bytes = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        bytes.extend_from_slice(&body);
+        let (done, rx) = oneshot::channel();
+        let sent = match self.writer.lock().unwrap().as_ref() {
+            Some(tx) => tx.send(WriteJob { bytes, done }).is_ok(),
+            None => false,
+        };
+        if !sent {
+            return Err("the server's stdin is closed".to_string());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("the server's stdin is closed".to_string()))
+    }
+
+    /// The error to report for a write that failed. A process that has
+    /// exited reports its exit. One that lives but lost its stdin can never
+    /// take another message: retire it.
+    async fn write_failed(self: &Arc<Self>, e: String) -> LspClientError {
+        if !self.running() {
+            return self.wait_gone().await;
+        }
+        let reason = self.crashed(format!(
+            "Language server for {} stopped reading its input ({}).",
+            self.language, e
+        ));
+        self.retire(Some(reason.clone()));
+        self.gone_reason().unwrap_or(reason)
+    }
+
+    async fn notify(
+        self: &Arc<Self>,
+        method: &str,
+        params: Value,
+        cancel: Option<&CancelSignal>,
+    ) -> Result<(), LspClientError> {
+        if let Some(reason) = self.gone_reason() {
+            return Err(reason);
+        }
+        let msg = serde_json::json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        let written = with_cancel(cancel, self.write(&msg)).await?;
+        match written {
+            Ok(()) => Ok(()),
+            Err(e) => Err(self.write_failed(e).await),
+        }
+    }
+
+    async fn request(
+        self: &Arc<Self>,
+        method: &str,
+        params: Value,
+        cancel: Option<&CancelSignal>,
+    ) -> Result<Value, LspClientError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let reply = {
+            let mut rpc = self.rpc.lock().unwrap();
+            if let Some(reason) = &rpc.gone {
+                return Err(reason.clone());
+            }
+            let (tx, rx) = oneshot::channel();
+            rpc.pending.insert(id, tx);
+            rx
+        };
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        let outcome = with_cancel(cancel, async {
+            if let Err(e) = self.write(&msg).await {
+                self.rpc.lock().unwrap().pending.remove(&id);
+                return Err(self.write_failed(e).await);
+            }
+            match reply.await {
+                Ok(r) => r,
+                Err(_) => Err(self.wait_gone().await),
+            }
+        })
+        .await;
+        match outcome {
+            Ok(r) => r,
+            Err(aborted) => {
+                self.rpc.lock().unwrap().pending.remove(&id);
+                self.send_cancel_request(id);
+                Err(aborted)
+            }
+        }
+    }
+
+    /// Ask the server to drop a request the caller gave up on. Best effort:
+    /// queued without waiting for the write.
+    fn send_cancel_request(&self, id: i64) {
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "$/cancelRequest",
+            "params": { "id": id },
+        });
+        let Ok(body) = serde_json::to_vec(&msg) else {
+            return;
+        };
+        let mut bytes = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        bytes.extend_from_slice(&body);
+        let (done, _) = oneshot::channel();
+        if let Some(tx) = self.writer.lock().unwrap().as_ref() {
+            let _ = tx.send(WriteJob { bytes, done });
+        }
+    }
+
+    /// Send didOpen once per path. Concurrent callers share the one in
+    /// flight, and wait for it under their own cancel signal, so a server
+    /// that stops reading stdin cannot hold a call past its budget.
+    async fn did_open_if_needed(
+        self: &Arc<Self>,
+        file_path: &str,
+        cancel: &CancelSignal,
+    ) -> Result<(), LspClientError> {
+        let mut rx = {
+            let mut opened = self.opened.lock().unwrap();
+            match opened.get(file_path) {
+                Some(rx) => rx.clone(),
+                None => {
+                    let (tx, rx) = watch::channel(None);
+                    opened.insert(file_path.to_string(), rx.clone());
+                    let me = Arc::clone(self);
+                    let path = file_path.to_string();
+                    tokio::spawn(async move {
+                        let text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+                        let params = serde_json::json!({
+                            "textDocument": {
+                                "uri": file_uri(&path),
+                                "languageId": me.language,
+                                "version": 1,
+                                "text": text,
+                            }
+                        });
+                        let r = me.notify("textDocument/didOpen", params, None).await;
+                        if r.is_err() {
+                            // A failed open is retried by the next call.
+                            me.opened.lock().unwrap().remove(&path);
+                        }
+                        let _ = tx.send(Some(r));
+                    });
+                    rx
+                }
+            }
+        };
+        let open = with_cancel(Some(cancel), async {
+            match rx.wait_for(|v| v.is_some()).await {
+                Ok(v) => v.clone().unwrap_or(Ok(())),
+                Err(_) => Err(LspClientError::Other("didOpen was dropped".to_string())),
+            }
+        })
+        .await?;
+        open
+    }
+
+    /// Take the server out of service: mark it crashed, so the next call
+    /// starts a new one, and stop its process. With a reason, every call
+    /// still waiting on it fails with that reason. A server still starting
+    /// stays `Starting` until its start fails, so no call sees it crashed
+    /// without the error to report.
+    fn retire(self: &Arc<Self>, reason: Option<LspClientError>) {
+        {
+            let mut st = self.status.lock().unwrap();
+            if st.state != EntryState::Starting {
+                st.state = EntryState::Crashed;
+            }
+        }
+        if let Some(r) = reason {
+            self.fire_gone(r);
+        }
+        self.begin_stop();
+    }
+
+    /// Start stopping the server in the background, once. `close_session`
+    /// waits for every stop that was begun.
+    fn begin_stop(self: &Arc<Self>) {
+        {
+            let mut st = self.status.lock().unwrap();
+            if st.stopping {
+                return;
+            }
+            st.stopping = true;
+        }
+        let me = Arc::clone(self);
+        let handle = tokio::spawn(async move { me.stop().await });
+        self.stops.lock().unwrap().push(handle);
+    }
+
+    /// Stop the server in bounded steps (design spec section 5.4).
+    async fn stop(self: &Arc<Self>) {
+        if self.running() {
+            let ready = self.status.lock().unwrap().state == EntryState::Ready;
+            let graceful = ready
+                && self.request_exit().await
+                && tokio::time::timeout(STOP_STEP, self.wait_exited())
+                    .await
+                    .is_ok();
+            if !graceful && self.running() {
+                let _ = self.kill.send(KillSignal::Term);
+                if tokio::time::timeout(STOP_STEP, self.wait_exited())
+                    .await
+                    .is_err()
+                {
+                    let _ = self.kill.send(KillSignal::Kill);
+                    let _ = tokio::time::timeout(STOP_STEP, self.wait_exited()).await;
+                }
+            }
+        }
+        // No write after this point.
+        self.writer.lock().unwrap().take();
+        if self.running() {
+            self.fire_gone(LspClientError::Other(format!(
+                "Language server for {} did not exit after SIGKILL.",
+                self.language
+            )));
+        } else {
+            // The process watcher reports the exit to calls still waiting.
+            let _ = tokio::time::timeout(STOP_STEP, self.wait_gone()).await;
+        }
+        let mut st = self.status.lock().unwrap();
+        if st.state != EntryState::Starting {
+            st.state = EntryState::Crashed;
+        }
+    }
+
+    /// Send `shutdown` and `exit`. True once `exit` is written; false when
+    /// the server failed or did not answer `shutdown` in time, exited, its
+    /// stdin broke, or `exit` was not written in time.
+    async fn request_exit(self: &Arc<Self>) -> bool {
+        let answered = tokio::time::timeout(STOP_STEP, async {
+            tokio::select! {
+                r = self.request("shutdown", Value::Null, None) => r.is_ok(),
+                _ = self.wait_exited() => false,
+            }
+        })
+        .await
+        .unwrap_or(false);
+        if !answered || !self.running() {
+            return false;
+        }
+        matches!(
+            tokio::time::timeout(STOP_STEP, self.notify("exit", Value::Null, None)).await,
+            Ok(Ok(()))
+        )
+    }
+}
+
+/// Run `fut` unless `cancel` fires first; then return `Aborted`. Nothing is
+/// cut off: a write already queued finishes in the writer task.
+async fn with_cancel<T>(
+    cancel: Option<&CancelSignal>,
+    fut: impl std::future::Future<Output = T>,
+) -> Result<T, LspClientError> {
+    let Some(cancel) = cancel else {
+        return Ok(fut.await);
+    };
+    if *cancel.borrow() {
+        return Err(LspClientError::Aborted);
+    }
+    let mut rx = cancel.clone();
+    let cancelled = async move {
+        let fired = rx.wait_for(|c| *c).await.is_ok();
+        if !fired {
+            // The sender is gone without cancelling: it never will.
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        v = fut => Ok(v),
+        _ = cancelled => Err(LspClientError::Aborted),
+    }
+}
+
+fn crash_message(summary: String, stderr_tail: &str) -> String {
+    let mut m = format!("{} The next call starts it again.", summary);
+    if !stderr_tail.is_empty() {
+        m.push_str("\nLast stderr output:\n");
+        m.push_str(stderr_tail);
+    }
+    m
+}
+
+fn exit_summary(language: &str, status: Option<ExitStatus>) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.and_then(|s| s.signal()) {
+            return format!(
+                "Language server for {} was killed by {}.",
+                language,
+                signal_name(sig)
+            );
+        }
+    }
+    match status.and_then(|s| s.code()) {
+        Some(code) => format!(
+            "Language server for {} exited with code {}.",
+            language, code
+        ),
+        None => format!("Language server for {} exited.", language),
+    }
+}
+
+#[cfg(unix)]
+fn signal_name(sig: i32) -> String {
+    let name = match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => return format!("signal {}", sig),
+    };
+    name.to_string()
+}
+
+fn send_term(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // SAFETY: plain kill(2) on our own child's pid; the child is not
+            // reaped yet, since this task owns it and has not seen it exit.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+            return;
+        }
+    }
+    let _ = child.start_kill();
+}
+
+fn append_tail(buf: &mut Vec<u8>, chunk: &[u8]) {
+    if chunk.len() >= STDERR_TAIL_BYTES {
+        buf.clear();
+        buf.extend_from_slice(&chunk[chunk.len() - STDERR_TAIL_BYTES..]);
+        return;
+    }
+    let keep = buf.len().min(STDERR_TAIL_BYTES - chunk.len());
+    let drop = buf.len() - keep;
+    buf.drain(..drop);
+    buf.extend_from_slice(chunk);
+}
+
+/// Writes queued messages in order, each one whole. After the first
+/// failure it writes nothing more and fails every later job.
+async fn writer_loop(mut stdin: ChildStdin, mut jobs: mpsc::UnboundedReceiver<WriteJob>) {
+    let mut broken: Option<String> = None;
+    while let Some(job) = jobs.recv().await {
+        if let Some(e) = &broken {
+            let _ = job.done.send(Err(e.clone()));
+            continue;
+        }
+        let r = async {
+            stdin.write_all(&job.bytes).await?;
+            stdin.flush().await
+        }
+        .await;
+        match r {
+            Ok(()) => {
+                let _ = job.done.send(Ok(()));
+            }
+            Err(e) => {
+                let e = e.to_string();
+                broken = Some(e.clone());
+                let _ = job.done.send(Err(e));
+            }
         }
     }
 }
 
-async fn send_notification(
-    entry: &ServerEntry,
-    method: &str,
-    params: Value,
-) -> Result<(), String> {
-    let msg = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": params,
-    });
-    write_message(entry, &msg).await
-}
-
-async fn write_message<T: Serialize>(entry: &ServerEntry, msg: &T) -> Result<(), String> {
-    let body = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    let mut stdin = entry.stdin.lock().await;
-    stdin
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    stdin.write_all(&body).await.map_err(|e| e.to_string())?;
-    stdin.flush().await.map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-async fn read_loop<R: tokio::io::AsyncRead + Unpin>(
-    reader: R,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>,
+async fn stderr_loop<R: AsyncRead + Unpin>(
+    mut stderr: R,
+    tail: Arc<StdMutex<Vec<u8>>>,
+    eof: oneshot::Sender<()>,
 ) {
+    let mut chunk = vec![0u8; 8192];
+    loop {
+        match stderr.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => append_tail(&mut tail.lock().unwrap(), &chunk[..n]),
+        }
+    }
+    let _ = eof.send(());
+}
+
+/// Watches the process: delivers signals, and when it exits reports the
+/// exit to every call still waiting on it.
+async fn watch_process(
+    entry: Arc<ServerEntry>,
+    mut child: Child,
+    mut kills: mpsc::UnboundedReceiver<KillSignal>,
+    stderr_eof: oneshot::Receiver<()>,
+) {
+    let status = loop {
+        tokio::select! {
+            s = child.wait() => break s.ok(),
+            Some(k) = kills.recv() => match k {
+                KillSignal::Term => send_term(&mut child),
+                KillSignal::Kill => {
+                    let _ = child.start_kill();
+                }
+            },
+        }
+    };
+    entry.exited.send_replace(true);
+    {
+        let mut st = entry.status.lock().unwrap();
+        if st.state == EntryState::Ready {
+            st.state = EntryState::Crashed;
+        }
+    }
+    let _ = tokio::time::timeout(STDERR_SETTLE, stderr_eof).await;
+    let summary = exit_summary(&entry.language, status);
+    entry.fire_gone(entry.crashed(summary));
+    entry.writer.lock().unwrap().take();
+}
+
+/// Reads replies off stdout. At end of file the server can never answer
+/// again: if the process lives on, it gets one stop step to exit, then it
+/// is retired.
+async fn read_loop<R: AsyncRead + Unpin>(entry: Arc<ServerEntry>, reader: R) {
     let mut reader = BufReader::new(reader);
     loop {
-        // Parse headers
         let mut content_length: Option<usize> = None;
+        let mut eof = false;
         loop {
             let mut line = String::new();
-            let n = match reader.read_line(&mut line).await {
-                Ok(n) => n,
-                Err(_) => return,
-            };
-            if n == 0 {
-                return; // EOF
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => {
+                    eof = true;
+                    break;
+                }
+                Ok(_) => {}
             }
             let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
             if trimmed.is_empty() {
                 break;
             }
-            if let Some(v) = trimmed
-                .to_ascii_lowercase()
-                .strip_prefix("content-length:")
-            {
+            if let Some(v) = trimmed.to_ascii_lowercase().strip_prefix("content-length:") {
                 if let Ok(n) = v.trim().parse::<usize>() {
                     content_length = Some(n);
                 }
             }
+        }
+        if eof {
+            break;
         }
         let Some(len) = content_length else {
             continue;
         };
         let mut buf = vec![0u8; len];
         if reader.read_exact(&mut buf).await.is_err() {
-            return;
+            break;
         }
-        let value: Value = match serde_json::from_slice(&buf) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Ok(value) = serde_json::from_slice::<Value>(&buf) else {
+            continue;
         };
-        // Route responses only (ignore server-pushed notifications for now).
-        if let Some(id_raw) = value.get("id") {
-            if let Some(id) = id_raw.as_i64() {
-                let tx_opt = {
-                    let mut p = pending.lock().await;
-                    p.remove(&id)
-                };
-                if let Some(tx) = tx_opt {
-                    if let Some(err) = value.get("error") {
-                        let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("error");
-                        let _ = tx.send(Err(msg.to_string()));
-                    } else {
-                        let r = value.get("result").cloned().unwrap_or(Value::Null);
-                        let _ = tx.send(Ok(r));
-                    }
-                }
-            }
+        // Route replies only; server-pushed messages are ignored.
+        let Some(id) = value.get("id").and_then(|i| i.as_i64()) else {
+            continue;
+        };
+        if value.get("method").is_some() {
+            continue;
         }
+        let tx = entry.rpc.lock().unwrap().pending.remove(&id);
+        if let Some(tx) = tx {
+            let reply = match value.get("error") {
+                Some(err) => Err(LspClientError::Other(
+                    err.get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("error")
+                        .to_string(),
+                )),
+                None => Ok(value.get("result").cloned().unwrap_or(Value::Null)),
+            };
+            let _ = tx.send(reply);
+        }
+    }
+    if entry.running()
+        && tokio::time::timeout(STOP_STEP, entry.wait_exited())
+            .await
+            .is_err()
+        && entry.running()
+    {
+        let reason = entry.crashed(format!(
+            "Language server for {} closed its output and stopped answering.",
+            entry.language
+        ));
+        entry.retire(Some(reason));
     }
 }
 
@@ -213,41 +711,11 @@ fn lsp_pos(p: Position1) -> Value {
 }
 
 fn from_lsp_line(n: i64) -> u32 {
-    (n as i64 + 1).max(1) as u32
+    (n + 1).max(1) as u32
 }
 
 fn from_lsp_char(n: i64) -> u32 {
-    (n as i64 + 1).max(1) as u32
-}
-
-async fn did_open_if_needed(entry: &ServerEntry, file_path: &str) -> Result<(), String> {
-    {
-        let opened = entry.opened_files.lock().await;
-        if opened.contains_key(file_path) {
-            return Ok(());
-        }
-    }
-    let text = tokio::fs::read_to_string(file_path)
-        .await
-        .unwrap_or_default();
-    let uri = file_uri(file_path);
-    let language_id = entry.language.clone();
-    send_notification(
-        entry,
-        "textDocument/didOpen",
-        serde_json::json!({
-            "textDocument": {
-                "uri": uri,
-                "languageId": language_id,
-                "version": 1,
-                "text": text,
-            }
-        }),
-    )
-    .await?;
-    let mut opened = entry.opened_files.lock().await;
-    opened.insert(file_path.to_string(), true);
-    Ok(())
+    (n + 1).max(1) as u32
 }
 
 async fn preview_line_at(path: &str, zero_indexed_line: i64) -> String {
@@ -323,7 +791,11 @@ fn flatten_hover_contents(contents: &Value) -> (String, bool) {
 }
 
 fn map_document_symbol(v: &Value, file_path: &str) -> LspSymbolInfo {
-    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let kind = v.get("kind").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
     let range = v
         .get("range")
@@ -333,10 +805,11 @@ fn map_document_symbol(v: &Value, file_path: &str) -> LspSymbolInfo {
     let start = range.get("start").cloned().unwrap_or(Value::Null);
     let line = start.get("line").and_then(|x| x.as_i64()).unwrap_or(0);
     let character = start.get("character").and_then(|x| x.as_i64()).unwrap_or(0);
-    let children = v
-        .get("children")
-        .and_then(|x| x.as_array())
-        .map(|arr| arr.iter().map(|c| map_document_symbol(c, file_path)).collect());
+    let children = v.get("children").and_then(|x| x.as_array()).map(|arr| {
+        arr.iter()
+            .map(|c| map_document_symbol(c, file_path))
+            .collect()
+    });
     LspSymbolInfo {
         name,
         kind: kind_name(kind).to_string(),
@@ -349,7 +822,11 @@ fn map_document_symbol(v: &Value, file_path: &str) -> LspSymbolInfo {
 }
 
 fn map_symbol_information(v: &Value) -> LspSymbolInfo {
-    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let kind = v.get("kind").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
     let loc = v.get("location").cloned().unwrap_or(Value::Null);
     let uri = loc.get("uri").and_then(|x| x.as_str()).unwrap_or("");
@@ -372,71 +849,122 @@ fn map_symbol_information(v: &Value) -> LspSymbolInfo {
     }
 }
 
-#[async_trait]
-impl LspClient for SpawnLspClient {
-    async fn ensure_server(
+pub struct SpawnLspClient {
+    servers: StdMutex<HashMap<String, Arc<ServerEntry>>>,
+    stops: Arc<StdMutex<Vec<JoinHandle<()>>>>,
+    initialize_timeout: Duration,
+}
+
+impl SpawnLspClient {
+    pub fn new() -> Self {
+        Self::with_options(SpawnLspClientOptions::default())
+    }
+
+    pub fn with_options(options: SpawnLspClientOptions) -> Self {
+        Self {
+            servers: StdMutex::new(HashMap::new()),
+            stops: Arc::new(StdMutex::new(Vec::new())),
+            initialize_timeout: Duration::from_millis(
+                options
+                    .initialize_timeout_ms
+                    .unwrap_or(DEFAULT_INITIALIZE_TIMEOUT_MS),
+            ),
+        }
+    }
+
+    fn key(language: &str, root: &str) -> String {
+        format!("{}|{}", language, root)
+    }
+
+    fn spawn_server(
         &self,
         language: &str,
         root: &str,
         profile: &LspServerProfile,
-    ) -> Result<ServerHandle, String> {
-        let key = Self::key(language, root);
-        {
-            let servers = self.servers.lock().await;
-            if let Some(entry) = servers.get(&key) {
-                return Ok(entry.handle().await);
-            }
-        }
-
+    ) -> Result<Arc<ServerEntry>, LspClientError> {
         let (cmd_str, args) = match profile.command.split_first() {
             Some((c, rest)) => (c.clone(), rest.to_vec()),
             None => {
-                return Err(format!("LSP profile '{}' has empty command", language));
+                return Err(LspClientError::Other(format!(
+                    "LSP profile '{}' has empty command",
+                    language
+                )));
             }
         };
         let mut cmd = Command::new(&cmd_str);
-        cmd.args(&args);
-        cmd.current_dir(root);
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        cmd.kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-        let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
-        let stdin = child.stdin.take().ok_or_else(|| "no stdin".to_string())?;
+        cmd.args(&args)
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| LspClientError::Other(format!("spawn {}: {}", cmd_str, e)))?;
+        let missing = || LspClientError::Other(format!("spawn {}: no stdio pipes", cmd_str));
+        let stdin = child.stdin.take().ok_or_else(missing)?;
+        let stdout = child.stdout.take().ok_or_else(missing)?;
+        let stderr = child.stderr.take().ok_or_else(missing)?;
 
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        {
-            let pending_clone = Arc::clone(&pending);
-            tokio::spawn(read_loop(stdout, pending_clone));
-        }
-
+        let (writer_tx, writer_rx) = mpsc::unbounded_channel();
+        let (kill_tx, kill_rx) = mpsc::unbounded_channel();
+        let (gone_flag, _) = watch::channel(false);
+        let (exited, _) = watch::channel(false);
         let entry = Arc::new(ServerEntry {
             language: language.to_string(),
             root: root.to_string(),
-            state: Mutex::new(ServerState::Starting),
-            stdin: Mutex::new(stdin),
-            pending: Arc::clone(&pending),
+            status: StdMutex::new(Status {
+                state: EntryState::Starting,
+                unreported_start_error: None,
+                stopping: false,
+            }),
+            rpc: StdMutex::new(Rpc {
+                gone: None,
+                pending: HashMap::new(),
+            }),
+            gone_flag,
+            exited,
+            writer: StdMutex::new(Some(writer_tx)),
+            kill: kill_tx,
             next_id: AtomicI64::new(1),
-            opened_files: Mutex::new(HashMap::new()),
-            _child: Mutex::new(child),
+            opened: StdMutex::new(HashMap::new()),
+            stderr: Arc::new(StdMutex::new(Vec::new())),
+            stops: Arc::clone(&self.stops),
         });
 
-        {
-            let mut servers = self.servers.lock().await;
-            servers.insert(key.clone(), Arc::clone(&entry));
-        }
+        let (stderr_eof_tx, stderr_eof_rx) = oneshot::channel();
+        tokio::spawn(writer_loop(stdin, writer_rx));
+        tokio::spawn(stderr_loop(
+            stderr,
+            Arc::clone(&entry.stderr),
+            stderr_eof_tx,
+        ));
+        tokio::spawn(read_loop(Arc::clone(&entry), stdout));
+        tokio::spawn(watch_process(
+            Arc::clone(&entry),
+            child,
+            kill_rx,
+            stderr_eof_rx,
+        ));
+        Ok(entry)
+    }
 
-        // initialize handshake
-        let root_uri = Url::from_file_path(Path::new(root))
+    /// Run the `initialize` handshake in its own task, so it goes on when
+    /// the caller gives up. Resolves with the start's outcome.
+    fn start(
+        &self,
+        entry: Arc<ServerEntry>,
+        profile: &LspServerProfile,
+    ) -> watch::Receiver<OpenResult> {
+        let root = entry.root.clone();
+        let root_uri = Url::from_file_path(Path::new(&root))
             .map(|u| u.to_string())
             .unwrap_or_else(|_| format!("file://{}", root));
         let init_params = serde_json::json!({
             "processId": std::process::id(),
             "rootUri": root_uri,
             "workspaceFolders": [
-                { "uri": root_uri, "name": Path::new(root).file_name().and_then(|s| s.to_str()).unwrap_or("workspace") }
+                { "uri": root_uri, "name": Path::new(&root).file_name().and_then(|s| s.to_str()).unwrap_or("workspace") }
             ],
             "capabilities": {
                 "textDocument": {
@@ -450,21 +978,179 @@ impl LspClient for SpawnLspClient {
             },
             "initializationOptions": profile.initialization_options.clone().unwrap_or(Value::Null),
         });
-        let (dummy_tx, _dummy_rx) = tokio::sync::watch::channel(false);
-        if let Err(e) =
-            send_request(&entry, "initialize", init_params, dummy_tx.subscribe()).await
-        {
-            let mut servers = self.servers.lock().await;
-            servers.remove(&key);
-            return Err(format!("initialize failed: {}", e));
-        }
-        let _ = send_notification(&entry, "initialized", serde_json::json!({})).await;
+        let limit = self.initialize_timeout;
+        let (tx, rx) = watch::channel(None);
+        tokio::spawn(async move {
+            let init =
+                tokio::time::timeout(limit, entry.request("initialize", init_params, None)).await;
+            let result = match init {
+                Err(_) => Err(LspClientError::Other(format!(
+                    "Language server for {} did not answer initialize within {}ms. The next call starts it again.",
+                    entry.language,
+                    limit.as_millis()
+                ))),
+                Ok(Err(e)) => Err(e),
+                Ok(Ok(_)) => match entry
+                    .notify("initialized", serde_json::json!({}), None)
+                    .await
+                {
+                    Err(e) => Err(e),
+                    // A server that exited right after the handshake is
+                    // not ready either.
+                    Ok(()) if !entry.running() => Err(entry.wait_gone().await),
+                    Ok(()) => Ok(()),
+                },
+            };
+            match &result {
+                Ok(()) => {
+                    let mut st = entry.status.lock().unwrap();
+                    if st.state == EntryState::Starting {
+                        st.state = EntryState::Ready;
+                    }
+                }
+                Err(e) => {
+                    {
+                        let mut st = entry.status.lock().unwrap();
+                        st.state = EntryState::Crashed;
+                        st.unreported_start_error = Some(e.clone());
+                    }
+                    entry.retire(None);
+                }
+            }
+            let _ = tx.send(Some(result));
+        });
+        rx
+    }
 
-        {
-            let mut state = entry.state.lock().await;
-            *state = ServerState::Ready;
+    fn entry_for(&self, handle: &ServerHandle) -> Result<Arc<ServerEntry>, LspClientError> {
+        let key = Self::key(&handle.language, &handle.root);
+        self.servers
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| LspClientError::Other(format!("no server entry for {}", key)))
+    }
+
+    /// The entry for a call. A server that died, or lost a pipe, since the
+    /// caller got its handle reports that.
+    async fn ready_entry(&self, handle: &ServerHandle) -> Result<Arc<ServerEntry>, LspClientError> {
+        let entry = self.entry_for(handle)?;
+        if let Some(reason) = entry.gone_reason() {
+            return Err(reason);
         }
-        Ok(entry.handle().await)
+        let state = entry.status.lock().unwrap().state;
+        if state == EntryState::Crashed && !entry.running() {
+            return Err(entry.wait_gone().await);
+        }
+        if state != EntryState::Ready {
+            return Err(LspClientError::Other(format!(
+                "Server for {} at {} is not ready (state={})",
+                handle.language,
+                handle.root,
+                state.as_str()
+            )));
+        }
+        Ok(entry)
+    }
+
+    async fn locations_like(
+        &self,
+        handle: &ServerHandle,
+        path: &str,
+        pos: Position1,
+        cancel: CancelSignal,
+        method: &str,
+    ) -> Result<Vec<LspLocation>, LspClientError> {
+        let entry = self.ready_entry(handle).await?;
+        entry.did_open_if_needed(path, &cancel).await?;
+        let mut params = serde_json::json!({
+            "textDocument": { "uri": file_uri(path) },
+            "position": lsp_pos(pos),
+        });
+        if method == "textDocument/references" {
+            params["context"] = serde_json::json!({ "includeDeclaration": true });
+        }
+        let r = entry.request(method, params, Some(&cancel)).await?;
+        if r.is_null() {
+            return Ok(Vec::new());
+        }
+        let items: Vec<Value> = if let Some(arr) = r.as_array() {
+            arr.clone()
+        } else {
+            vec![r]
+        };
+        let mut out: Vec<LspLocation> = Vec::new();
+        for item in &items {
+            if let Some(loc) = normalize_location(item).await {
+                out.push(loc);
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl Default for SpawnLspClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl LspClient for SpawnLspClient {
+    async fn ensure_server(
+        &self,
+        language: &str,
+        root: &str,
+        profile: &LspServerProfile,
+        cancel: CancelSignal,
+    ) -> Result<ServerHandle, LspClientError> {
+        let key = Self::key(language, root);
+        {
+            let mut servers = self.servers.lock().unwrap();
+            if let Some(entry) = servers.get(&key).cloned() {
+                let mut st = entry.status.lock().unwrap();
+                if st.state != EntryState::Crashed {
+                    drop(st);
+                    return Ok(entry.handle());
+                }
+                if *cancel.borrow() {
+                    return Err(LspClientError::Aborted);
+                }
+                // A start that failed after its caller gave up: report it
+                // once; the call after this one starts a new server.
+                if let Some(reason) = st.unreported_start_error.take() {
+                    drop(st);
+                    servers.remove(&key);
+                    return Err(reason);
+                }
+            }
+        }
+        if *cancel.borrow() {
+            return Err(LspClientError::Aborted);
+        }
+
+        let entry = self.spawn_server(language, root, profile)?;
+        self.servers.lock().unwrap().insert(key, Arc::clone(&entry));
+        let mut started = self.start(Arc::clone(&entry), profile);
+        // An abort releases the caller only. The handshake goes on, bounded
+        // by the initialize limit, and the next call finds the server
+        // starting or ready, or is told why the start failed.
+        let outcome = with_cancel(Some(&cancel), async {
+            match started.wait_for(|v| v.is_some()).await {
+                Ok(v) => v.clone().unwrap_or(Ok(())),
+                Err(_) => Err(LspClientError::Other("the start was dropped".to_string())),
+            }
+        })
+        .await?;
+        match outcome {
+            Ok(()) => Ok(entry.handle()),
+            Err(e) => {
+                // This caller got the start's own error: it is reported.
+                entry.status.lock().unwrap().unreported_start_error = None;
+                Err(e)
+            }
+        }
     }
 
     async fn hover(
@@ -473,14 +1159,16 @@ impl LspClient for SpawnLspClient {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Option<LspHoverResult>, String> {
-        let entry = self.entry_for(handle).await?;
-        did_open_if_needed(&entry, path).await?;
+    ) -> Result<Option<LspHoverResult>, LspClientError> {
+        let entry = self.ready_entry(handle).await?;
+        entry.did_open_if_needed(path, &cancel).await?;
         let params = serde_json::json!({
             "textDocument": { "uri": file_uri(path) },
             "position": lsp_pos(pos),
         });
-        let r = send_request(&entry, "textDocument/hover", params, cancel).await?;
+        let r = entry
+            .request("textDocument/hover", params, Some(&cancel))
+            .await?;
         if r.is_null() {
             return Ok(None);
         }
@@ -501,8 +1189,9 @@ impl LspClient for SpawnLspClient {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspLocation>, String> {
-        self.locations_like(handle, path, pos, cancel, "textDocument/definition").await
+    ) -> Result<Vec<LspLocation>, LspClientError> {
+        self.locations_like(handle, path, pos, cancel, "textDocument/definition")
+            .await
     }
 
     async fn references(
@@ -511,8 +1200,9 @@ impl LspClient for SpawnLspClient {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspLocation>, String> {
-        self.locations_like(handle, path, pos, cancel, "textDocument/references").await
+    ) -> Result<Vec<LspLocation>, LspClientError> {
+        self.locations_like(handle, path, pos, cancel, "textDocument/references")
+            .await
     }
 
     async fn implementation(
@@ -521,8 +1211,9 @@ impl LspClient for SpawnLspClient {
         path: &str,
         pos: Position1,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspLocation>, String> {
-        self.locations_like(handle, path, pos, cancel, "textDocument/implementation").await
+    ) -> Result<Vec<LspLocation>, LspClientError> {
+        self.locations_like(handle, path, pos, cancel, "textDocument/implementation")
+            .await
     }
 
     async fn document_symbol(
@@ -530,21 +1221,22 @@ impl LspClient for SpawnLspClient {
         handle: &ServerHandle,
         path: &str,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspSymbolInfo>, String> {
-        let entry = self.entry_for(handle).await?;
-        did_open_if_needed(&entry, path).await?;
+    ) -> Result<Vec<LspSymbolInfo>, LspClientError> {
+        let entry = self.ready_entry(handle).await?;
+        entry.did_open_if_needed(path, &cancel).await?;
         let params = serde_json::json!({
             "textDocument": { "uri": file_uri(path) },
         });
-        let r = send_request(&entry, "textDocument/documentSymbol", params, cancel).await?;
+        let r = entry
+            .request("textDocument/documentSymbol", params, Some(&cancel))
+            .await?;
         let Some(arr) = r.as_array() else {
             return Ok(Vec::new());
         };
         if arr.is_empty() {
             return Ok(Vec::new());
         }
-        let first = &arr[0];
-        if first.get("location").is_some() {
+        if arr[0].get("location").is_some() {
             Ok(arr.iter().map(map_symbol_information).collect())
         } else {
             Ok(arr.iter().map(|v| map_document_symbol(v, path)).collect())
@@ -556,75 +1248,109 @@ impl LspClient for SpawnLspClient {
         handle: &ServerHandle,
         query: &str,
         cancel: CancelSignal,
-    ) -> Result<Vec<LspSymbolInfo>, String> {
-        let entry = self.entry_for(handle).await?;
+    ) -> Result<Vec<LspSymbolInfo>, LspClientError> {
+        let entry = self.ready_entry(handle).await?;
         let params = serde_json::json!({ "query": query });
-        let r = send_request(&entry, "workspace/symbol", params, cancel).await?;
+        let r = entry
+            .request("workspace/symbol", params, Some(&cancel))
+            .await?;
         let Some(arr) = r.as_array() else {
             return Ok(Vec::new());
         };
         Ok(arr.iter().map(map_symbol_information).collect())
     }
 
+    /// Stop every server, in parallel, and return once each has exited.
     async fn close_session(&self) {
-        let mut servers = self.servers.lock().await;
-        for (_, entry) in servers.drain() {
-            // Best-effort shutdown.
-            let (dummy_tx, _) = tokio::sync::watch::channel(false);
-            let _ = send_request(
-                &entry,
-                "shutdown",
-                Value::Null,
-                dummy_tx.subscribe(),
-            )
-            .await;
-            let _ = send_notification(&entry, "exit", Value::Null).await;
+        let entries: Vec<Arc<ServerEntry>> = self
+            .servers
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, e)| e)
+            .collect();
+        for entry in &entries {
+            entry.begin_stop();
+        }
+        loop {
+            let stops: Vec<JoinHandle<()>> = std::mem::take(&mut *self.stops.lock().unwrap());
+            if stops.is_empty() {
+                break;
+            }
+            for stop in stops {
+                let _ = stop.await;
+            }
         }
     }
 }
 
-impl SpawnLspClient {
-    async fn entry_for(&self, handle: &ServerHandle) -> Result<Arc<ServerEntry>, String> {
-        let key = Self::key(&handle.language, &handle.root);
-        let servers = self.servers.lock().await;
-        servers
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| format!("no server entry for {}", key))
-    }
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
 
-    async fn locations_like(
-        &self,
-        handle: &ServerHandle,
-        path: &str,
-        pos: Position1,
-        cancel: CancelSignal,
-        method: &str,
-    ) -> Result<Vec<LspLocation>, String> {
-        let entry = self.entry_for(handle).await?;
-        did_open_if_needed(&entry, path).await?;
-        let mut params = serde_json::json!({
-            "textDocument": { "uri": file_uri(path) },
-            "position": lsp_pos(pos),
-        });
-        if method == "textDocument/references" {
-            params["context"] = serde_json::json!({ "includeDeclaration": true });
-        }
-        let r = send_request(&entry, method, params, cancel).await?;
-        if r.is_null() {
-            return Ok(Vec::new());
-        }
-        let items: Vec<Value> = if let Some(arr) = r.as_array() {
-            arr.clone()
-        } else {
-            vec![r]
+    const FAKE_SERVER: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/lsp/test/fixtures/fake-lsp-server.mjs"
+    );
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_exit_write_is_bounded_when_a_queued_write_fills_the_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let profile = LspServerProfile {
+            language: "fake".to_string(),
+            extensions: vec![".fake".to_string()],
+            command: vec![
+                "node".to_string(),
+                FAKE_SERVER.to_string(),
+                "stop-reading-after-shutdown".to_string(),
+                root.clone(),
+            ],
+            root_patterns: None,
+            initialization_options: None,
         };
-        let mut out: Vec<LspLocation> = Vec::new();
-        for item in &items {
-            if let Some(loc) = normalize_location(item).await {
-                out.push(loc);
-            }
-        }
-        Ok(out)
+        let client = SpawnLspClient::new();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        client
+            .ensure_server("fake", &root, &profile, cancel_rx)
+            .await
+            .unwrap();
+        let entry = client
+            .servers
+            .lock()
+            .unwrap()
+            .get(&SpawnLspClient::key("fake", &root))
+            .cloned()
+            .unwrap();
+        let exit_requested = {
+            let e = Arc::clone(&entry);
+            tokio::spawn(async move { e.request_exit().await })
+        };
+        // The server reads `shutdown`, stops reading, and answers 200ms later.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // A write larger than the pipe buffer, queued ahead of `exit`, as an
+        // abandoned didOpen would be.
+        let filler = {
+            let e = Arc::clone(&entry);
+            tokio::spawn(async move {
+                let text = "x".repeat(4 * 1024 * 1024);
+                let params = serde_json::json!({
+                    "textDocument": { "uri": "file:///big", "languageId": "fake", "version": 1, "text": text }
+                });
+                let _ = e.notify("textDocument/didOpen", params, None).await;
+            })
+        };
+        let sent = tokio::time::timeout(Duration::from_secs(10), exit_requested)
+            .await
+            .expect("request_exit did not return")
+            .unwrap();
+        assert!(!sent, "`exit` cannot be written behind a blocked write");
+        client.close_session().await;
+        filler.abort();
     }
 }
