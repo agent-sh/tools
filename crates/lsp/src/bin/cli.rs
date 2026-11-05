@@ -93,9 +93,12 @@ impl SessionSpec {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // Registered once, before anything else: a stop signal that comes while
+    // no wait below is polling for it is kept for the next one.
+    let mut signals = StopSignals::new();
     let (input, mut signal) = tokio::select! {
         r = serve() => (r, None),
-        s = stop_signal() => (Ok(()), Some(s)),
+        s = signals.recv() => (Ok(()), Some(s)),
     };
     // Each server runs in its own process group, so a signal sent to this
     // process or its group never reaches it. Stop every server, and its
@@ -106,7 +109,7 @@ async fn main() -> std::io::Result<()> {
     loop {
         tokio::select! {
             _ = &mut closing => break,
-            s = stop_signal() => {
+            s = signals.recv() => {
                 if signal.is_some() {
                     std::process::exit(128 + s);
                 }
@@ -120,31 +123,59 @@ async fn main() -> std::io::Result<()> {
     }
 }
 
-/// Resolves with the signal number once SIGINT, SIGTERM or SIGHUP arrives.
+/// SIGINT, SIGTERM and SIGHUP (Windows: Ctrl-C). None when they could not
+/// be registered; the CLI then has no stop signals to wait for.
+struct StopSignals(Option<Streams>);
+
 #[cfg(unix)]
-async fn stop_signal() -> i32 {
-    use tokio::signal::unix::{signal, SignalKind};
-    let (Ok(mut int), Ok(mut term), Ok(mut hup)) = (
-        signal(SignalKind::interrupt()),
-        signal(SignalKind::terminate()),
-        signal(SignalKind::hangup()),
-    ) else {
-        return std::future::pending().await;
-    };
-    tokio::select! {
-        _ = int.recv() => libc::SIGINT,
-        _ = term.recv() => libc::SIGTERM,
-        _ = hup.recv() => libc::SIGHUP,
-    }
+struct Streams {
+    int: tokio::signal::unix::Signal,
+    term: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
 }
 
-/// Resolves once Ctrl-C arrives.
 #[cfg(not(unix))]
-async fn stop_signal() -> i32 {
-    if tokio::signal::ctrl_c().await.is_err() {
-        return std::future::pending().await;
+struct Streams(tokio::signal::windows::CtrlC);
+
+impl StopSignals {
+    #[cfg(unix)]
+    fn new() -> Self {
+        use tokio::signal::unix::{signal, SignalKind};
+        let streams = || -> std::io::Result<Streams> {
+            Ok(Streams {
+                int: signal(SignalKind::interrupt())?,
+                term: signal(SignalKind::terminate())?,
+                hup: signal(SignalKind::hangup())?,
+            })
+        };
+        Self(streams().ok())
     }
-    2
+
+    #[cfg(not(unix))]
+    fn new() -> Self {
+        Self(tokio::signal::windows::ctrl_c().ok().map(Streams))
+    }
+
+    /// The number of the next stop signal.
+    async fn recv(&mut self) -> i32 {
+        let Some(streams) = self.0.as_mut() else {
+            return std::future::pending().await;
+        };
+        #[cfg(unix)]
+        let got = tokio::select! {
+            Some(()) = streams.int.recv() => Some(libc::SIGINT),
+            Some(()) = streams.term.recv() => Some(libc::SIGTERM),
+            Some(()) = streams.hup.recv() => Some(libc::SIGHUP),
+            else => None,
+        };
+        #[cfg(not(unix))]
+        let got = streams.0.recv().await.map(|()| 2);
+        match got {
+            Some(signal) => signal,
+            // The signal driver is gone; no stop signal can come.
+            None => std::future::pending().await,
+        }
+    }
 }
 
 async fn serve() -> std::io::Result<()> {
