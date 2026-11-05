@@ -25,7 +25,15 @@ struct Cli {
 
 /// Starts the CLI and has it start a fake server in `mode`.
 async fn cli_with_a_server(fake: &Fake, mode: &str) -> Cli {
-    let mut process = Command::new(env!("CARGO_BIN_EXE_harness-lsp-cli"))
+    cli_with_a_server_and_env(fake, mode, &[]).await
+}
+
+async fn cli_with_a_server_and_env(fake: &Fake, mode: &str, env: &[(&str, &Path)]) -> Cli {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_harness-lsp-cli"));
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut process = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -97,6 +105,15 @@ async fn exit_code(cli: &mut Cli) -> Option<i32> {
         .code()
 }
 
+fn send(cli: &Cli, signal: &str) {
+    let pid = cli.process.id().unwrap().to_string();
+    let status = std::process::Command::new("kill")
+        .args([format!("-{signal}"), pid])
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -{signal} failed");
+}
+
 fn assert_stopped(fake: &Fake, cli: &Cli) {
     assert!(fake.exists("exit"), "the server never got `exit`");
     assert!(!alive(cli.server), "the server outlived the CLI");
@@ -159,6 +176,72 @@ async fn a_stop_signal_right_after_end_of_input_still_lets_the_close_finish() {
         assert!(status.success());
         assert_eq!(exit_code(&mut cli).await, Some(143));
         assert!(!alive(cli.server), "the server outlived the CLI");
+        assert!(
+            gone_within(cli.child, Duration::from_secs(1)).await,
+            "the server's child outlived the CLI"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_signal_before_the_close_begins_is_kept() {
+    common::bounded(async {
+        let fake = Fake::new();
+        let pause = tempfile::tempdir().unwrap();
+        let mut cli = cli_with_a_server_and_env(
+            &fake,
+            "well-behaved-with-child",
+            &[("HARNESS_LSP_CLI_TEST_PAUSE_DIR", pause.path())],
+        )
+        .await;
+        drop(cli.stdin.take());
+        // The CLI has seen the end of its input and waits before the close,
+        // with no wait for a signal running.
+        let paused = pause.path().join("paused");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !paused.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the CLI never paused"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        send(&cli, "TERM");
+        // Long enough for the runtime to take the signal while it waits.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::write(pause.path().join("resume"), "").unwrap();
+        assert_eq!(exit_code(&mut cli).await, Some(143), "the SIGTERM was lost");
+        assert_stopped(&fake, &cli);
+        assert!(
+            gone_within(cli.child, Duration::from_secs(1)).await,
+            "the server's child outlived the CLI"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_stop_signal_cuts_the_close_short_and_still_stops_every_server() {
+    common::bounded(async {
+        let fake = Fake::new();
+        // Ignores `exit` and SIGTERM, and so does its child: a full close
+        // takes two 2s stop steps.
+        let mut cli = cli_with_a_server(&fake, "stubborn-with-child").await;
+        let first = tokio::time::Instant::now();
+        send(&cli, "TERM");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        send(&cli, "INT");
+        assert_eq!(exit_code(&mut cli).await, Some(130));
+        let took = first.elapsed();
+        assert!(
+            took < Duration::from_secs(3),
+            "the CLI waited {took:?}, so the second signal did not cut the close short"
+        );
+        assert!(
+            gone_within(cli.server, Duration::from_secs(1)).await,
+            "the server outlived the CLI"
+        );
         assert!(
             gone_within(cli.child, Duration::from_secs(1)).await,
             "the server's child outlived the CLI"

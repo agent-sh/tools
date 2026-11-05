@@ -628,7 +628,8 @@ impl Drop for ServerGroup {
 /// A notice that fires once process `pid` has exited, without reaping it:
 /// until `child.wait()` reaps it, its pid and group id stay taken. It
 /// carries true once `waitid` saw the exit, false if `waitid` failed. None
-/// when the waiting thread could not start.
+/// when the waiting thread could not start. A stopped or continued process
+/// has not exited: macOS reports those to this `waitid` too.
 #[cfg(unix)]
 fn exit_notice(pid: u32) -> Option<oneshot::Receiver<bool>> {
     let (tx, rx) = oneshot::channel();
@@ -649,11 +650,33 @@ fn exit_notice(pid: u32) -> Option<oneshot::Receiver<bool>> {
                         libc::WEXITED | libc::WNOWAIT,
                     )
                 };
-                if r == 0 {
-                    break true;
-                }
-                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                if r != 0 {
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
                     break false;
+                }
+                match info.si_code {
+                    libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED => break true,
+                    _ => {
+                        // A stop or continue, which macOS reports here even
+                        // without WSTOPPED. WNOWAIT leaves the report
+                        // pending, so consume it and wait again, as CPython
+                        // does (python/cpython#158962). The pause keeps an
+                        // unknown report from making this loop spin.
+                        // SAFETY: as above; without WEXITED this call cannot
+                        // reap the process.
+                        unsafe {
+                            let mut seen: libc::siginfo_t = std::mem::zeroed();
+                            libc::waitid(
+                                libc::P_PID,
+                                pid as libc::id_t,
+                                &mut seen,
+                                libc::WSTOPPED | libc::WCONTINUED | libc::WNOHANG,
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                 }
             };
             let _ = tx.send(exited);
@@ -698,6 +721,9 @@ async fn watch_process(
     mut kills: mpsc::UnboundedReceiver<KillSignal>,
     stderr_eof: oneshot::Receiver<()>,
 ) {
+    // Declared before anything that can reap the server: when this future
+    // is dropped, its locals drop before its parameters, so `group` kills
+    // the group before the drop of `child` (kill_on_drop) can reap it.
     #[cfg(unix)]
     let mut group = ServerGroup(child.id());
     #[cfg(not(unix))]
@@ -2260,5 +2286,105 @@ mod tests {
         {
             panic!("the stress run did not finish");
         }
+    }
+}
+
+/// Tests that need no `/proc`, so they run on every Unix, macOS included.
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+
+    const FAKE_SERVER: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/lsp/test/fixtures/fake-lsp-server.mjs"
+    );
+
+    /// True while the process exists, a zombie not yet reaped included.
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn signal(pid: i32, sig: libc::c_int) {
+        // SAFETY: kill(2) on a process this test started.
+        assert_eq!(unsafe { libc::kill(pid, sig) }, 0);
+    }
+
+    async fn read_pid(root: &str, name: &str) -> i32 {
+        let path = Path::new(root).join(name);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(pid) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{} never appeared",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stopped_server_is_not_taken_for_an_exited_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let profile = LspServerProfile {
+            language: "fake".to_string(),
+            extensions: vec![".fake".to_string()],
+            command: vec![
+                "node".to_string(),
+                FAKE_SERVER.to_string(),
+                "well-behaved-with-child".to_string(),
+                root.clone(),
+            ],
+            root_patterns: None,
+            initialization_options: None,
+        };
+        let client = SpawnLspClient::new();
+        let (_tx, rx) = watch::channel(false);
+        client
+            .ensure_server("fake", &root, &profile, rx)
+            .await
+            .unwrap();
+        let entry = match client
+            .servers
+            .lock()
+            .unwrap()
+            .get(&SpawnLspClient::key("fake", &root))
+        {
+            Some(Slot::Server(entry)) => Arc::clone(entry),
+            _ => panic!("no server for the key"),
+        };
+        let server = read_pid(&root, "pid").await;
+        let child = read_pid(&root, "child-pid").await;
+        signal(server, libc::SIGSTOP);
+        // A watcher that takes the stop for an exit kills the group at once.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            entry.running() && alive(server) && alive(child),
+            "a stopped server was taken for an exited one"
+        );
+        signal(server, libc::SIGCONT);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            entry.running() && alive(server) && alive(child),
+            "a continued server was taken for an exited one"
+        );
+        client.close_session().await;
+        assert!(
+            Path::new(&root).join("exit").exists(),
+            "the server did not get `exit`"
+        );
+        assert!(!alive(server), "the server is still running");
     }
 }

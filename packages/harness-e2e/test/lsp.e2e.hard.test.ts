@@ -26,6 +26,7 @@ import {
   runE2E,
   warmupOllama,
   type AgentTraceEvent,
+  type ToolExecutor,
 } from "../src/index.js";
 
 /**
@@ -33,13 +34,33 @@ import {
  * lsp call through `harness-lsp-cli`. Default (unset) uses TS.
  */
 const LSP_ENGINE = (process.env.HARNESS_LSP_ENGINE ?? 'ts').toLowerCase();
-const pickLspExecutor: typeof makeLspExecutor =
-  LSP_ENGINE === 'rust'
-    ? ((session) => {
-        const r = makeLspExecutorRust(session);
-        return { tool: r.tool, execute: r.execute };
-      })
-    : makeLspExecutor;
+
+/**
+ * Cleanups for what a test started: each session's client and each Rust
+ * runner. afterEach runs them, so no language server outlives its test.
+ */
+const cleanups: Array<() => Promise<void>> = [];
+
+/**
+ * One executor per session, so the warmup and the test drive the same
+ * language server (in Rust mode, the same `harness-lsp-cli`).
+ */
+const executors = new WeakMap<LspSessionConfig, ToolExecutor>();
+
+function pickLspExecutor(session: LspSessionConfig): ToolExecutor {
+  const existing = executors.get(session);
+  if (existing) return existing;
+  let exec: ToolExecutor;
+  if (LSP_ENGINE === 'rust') {
+    const r = makeLspExecutorRust(session);
+    cleanups.push(() => r.close());
+    exec = { tool: r.tool, execute: r.execute };
+  } else {
+    exec = makeLspExecutor(session);
+  }
+  executors.set(session, exec);
+  return exec;
+}
 
 
 loadDotEnv();
@@ -153,7 +174,7 @@ function makeSession(
   root: string,
   overrides: Partial<LspSessionConfig> = {},
 ): LspSessionConfig {
-  return {
+  const session: LspSessionConfig = {
     cwd: root,
     permissions: {
       roots: [root],
@@ -164,6 +185,9 @@ function makeSession(
     manifest: manifestFor(root),
     ...overrides,
   };
+  const { client } = session;
+  if (client) cleanups.push(() => client.closeSession());
+  return session;
 }
 
 /**
@@ -294,6 +318,10 @@ describe(`lsp e2e hard [${LABEL}]`, () => {
         }`,
       );
     }
+  });
+
+  afterEach(async () => {
+    await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
   afterEach((ctx) => {

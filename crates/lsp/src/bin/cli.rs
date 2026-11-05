@@ -4,7 +4,9 @@ use harness_core::{PermissionPolicy, ToolError, ToolErrorCode};
 use harness_lsp::{lsp, LspClient, LspPermissionPolicy, LspSessionConfig, SpawnLspClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Debug, Deserialize)]
@@ -91,8 +93,35 @@ impl SessionSpec {
     }
 }
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+/// Test hook: when set to a directory, the CLI pauses at the end of its
+/// input, before the close, until `resume` exists there, and writes
+/// `paused` there once it waits. Tests use it to send a signal at that
+/// point.
+const PAUSE_DIR_ENV: &str = "HARNESS_LSP_CLI_TEST_PAUSE_DIR";
+
+fn main() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            std::process::exit(1);
+        }
+    };
+    let code = runtime.block_on(run());
+    // Shutting the runtime down drops every task, so each server's watcher
+    // kills the server's process group: that still stops every server, and
+    // its children, when a second stop signal cut the close short. Bounded,
+    // since a blocking read of stdin may still be waiting.
+    runtime.shutdown_timeout(Duration::from_millis(500));
+    std::process::exit(code);
+}
+
+/// Serves until the end of input or a stop signal, then stops every server.
+/// Returns the exit code: 128 plus the signal number after a stop signal.
+async fn run() -> i32 {
     // Registered once, before anything else: a stop signal that comes while
     // no wait below is polling for it is kept for the next one.
     let mut signals = StopSignals::new();
@@ -100,9 +129,15 @@ async fn main() -> std::io::Result<()> {
         r = serve() => (r, None),
         s = signals.recv() => (Ok(()), Some(s)),
     };
+    if signal.is_none() {
+        if let Some(dir) = std::env::var_os(PAUSE_DIR_ENV) {
+            pause(Path::new(&dir)).await;
+        }
+    }
     // Each server runs in its own process group, so a signal sent to this
     // process or its group never reaches it. Stop every server, and its
-    // children, before exiting. A second stop signal skips the wait.
+    // children, before exiting. A second stop signal skips the wait; the
+    // runtime shutdown in `main` then kills what is left.
     let client = client();
     let closing = client.close_session();
     tokio::pin!(closing);
@@ -111,15 +146,26 @@ async fn main() -> std::io::Result<()> {
             _ = &mut closing => break,
             s = signals.recv() => {
                 if signal.is_some() {
-                    std::process::exit(128 + s);
+                    return 128 + s;
                 }
                 signal = Some(s);
             }
         }
     }
-    match signal {
-        Some(s) => std::process::exit(128 + s),
-        None => input,
+    match (signal, input) {
+        (Some(s), _) => 128 + s,
+        (None, Ok(())) => 0,
+        (None, Err(e)) => {
+            eprintln!("Error: {e:?}");
+            1
+        }
+    }
+}
+
+async fn pause(dir: &Path) {
+    let _ = std::fs::write(dir.join("paused"), "");
+    while !dir.join("resume").exists() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 

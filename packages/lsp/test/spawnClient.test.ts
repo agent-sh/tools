@@ -250,6 +250,46 @@ describe("spawn client: closeSession", () => {
     expect(await goneWithin(child, 1_000)).toBe(true);
   }, 15_000);
 
+  it("kills each live server's group when the host exits without closeSession", async () => {
+    const before = process.listeners("exit");
+    const client = createSpawnLspClient();
+    // Exits on `exit`; its child ignores SIGTERM and never exits.
+    await client.ensureServer({
+      language: "fake",
+      root,
+      profile: fakeProfile("well-behaved-with-child", root),
+    });
+    const pid = serverPid(root);
+    const child = await childPid(root);
+    const added = process.listeners("exit").filter((l) => !before.includes(l));
+    expect(added).toHaveLength(1);
+
+    // What Node runs when the host calls process.exit() without closeSession.
+    (added[0] as () => void)();
+
+    expect(await goneWithin(pid, 1_000)).toBe(true);
+    expect(await goneWithin(child, 1_000)).toBe(true);
+    // The server has exited, so the handler is gone.
+    await expect.poll(() => process.listeners("exit").includes(added[0]!)).toBe(false);
+    await client.closeSession();
+  });
+
+  it("removes its exit handler once closeSession has stopped every server", async () => {
+    const before = process.listeners("exit");
+    const client = createSpawnLspClient();
+    await client.ensureServer({
+      language: "fake",
+      root,
+      profile: fakeProfile("well-behaved", root),
+    });
+    const added = process.listeners("exit").filter((l) => !before.includes(l));
+    expect(added).toHaveLength(1);
+
+    await client.closeSession();
+
+    expect(process.listeners("exit").includes(added[0]!)).toBe(false);
+  });
+
   it("returns only after a server that needs SIGKILL is gone", async () => {
     const client = createSpawnLspClient();
     await client.ensureServer({

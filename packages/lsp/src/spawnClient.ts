@@ -113,6 +113,28 @@ export function createSpawnLspClient(
   const servers = new Map<string, ServerEntry>();
   /** Stops of retired servers, which may no longer be in `servers`. */
   const stops = new Set<Promise<void>>();
+  /**
+   * Servers whose process has not exited yet, retired ones included. While
+   * there is one, a `process` exit handler kills each one's process group,
+   * so a host that exits without `closeSession` leaves no server or child
+   * behind, as a Rust runtime that shuts down does. The handler goes once
+   * the last of them has exited, so `closeSession` removes it. Hosts still
+   * handle SIGINT and SIGTERM themselves: the library installs no signal
+   * handler.
+   */
+  const live = new Set<ChildProcess>();
+  const killLiveGroups = (): void => {
+    for (const proc of live) signalServer(proc, "SIGKILL");
+  };
+
+  function track(proc: ChildProcess): void {
+    if (live.size === 0) process.once("exit", killLiveGroups);
+    live.add(proc);
+    proc.once("exit", () => {
+      live.delete(proc);
+      if (live.size === 0) process.off("exit", killLiveGroups);
+    });
+  }
 
   function key(language: string, root: string): string {
     return `${language}|${root}`;
@@ -259,6 +281,8 @@ export function createSpawnLspClient(
       env: process.env,
       detached: OWN_GROUP,
     });
+    // A failed spawn has no pid and never exits.
+    if (proc.pid !== undefined) track(proc);
 
     // Drain stderr: once the pipe fills, a server that keeps writing to it
     // blocks. Keep only a bounded tail, for the exit error.
@@ -732,7 +756,6 @@ function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** True while the process was spawned and has not exited yet. */
 /**
  * Signal the server and, on POSIX, everything in its process group. Sent
  * only while the server has not exited, so its pid, and with it the group
@@ -765,6 +788,7 @@ function killGroup(proc: ChildProcess): void {
   }
 }
 
+/** True while the process was spawned and has not exited yet. */
 function isRunning(proc: ChildProcess): boolean {
   return (
     proc.pid !== undefined && proc.exitCode === null && proc.signalCode === null
