@@ -1026,12 +1026,15 @@ impl Gate {
         self.open.notify_all();
     }
 
+    /// Waits for a permit, for at most the test limit, so a test that
+    /// fails before it releases the gate still ends.
     fn pass(&self) {
-        let mut permits = self.permits.lock().unwrap();
-        while *permits == 0 {
-            permits = self.open.wait(permits).unwrap();
-        }
-        *permits -= 1;
+        let permits = self.permits.lock().unwrap();
+        let (mut permits, _) = self
+            .open
+            .wait_timeout_while(permits, Duration::from_secs(20), |p| *p == 0)
+            .unwrap();
+        *permits = permits.saturating_sub(1);
     }
 }
 
@@ -1577,6 +1580,11 @@ impl LspClient for SpawnLspClient {
                     if st.state != EntryState::Crashed {
                         drop(st);
                         return Ok(entry.handle());
+                    }
+                    // A cancelled call leaves a deferred start failure for
+                    // the next call.
+                    if *cancel.borrow() {
+                        return Err(LspClientError::Aborted);
                     }
                     // A start that failed after its caller gave up: report
                     // it once; the call after this one starts a new server.
@@ -2855,6 +2863,75 @@ mod tests {
             instances,
             vec![second.instance],
             "an old record outlived its age"
+        );
+        client.close_session().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cancelled_call_leaves_a_deferred_start_failure_for_the_next_call() {
+        let (_dir, root) = temp_root();
+        let began = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = Arc::new(Gate::default());
+        let mut client = SpawnLspClient::new();
+        client.slow_spawn = Some((
+            "fake".to_string(),
+            Hold::Until(Arc::clone(&gate)),
+            Arc::clone(&began),
+        ));
+        let client = Arc::new(client);
+        // The first call gives up while its spawn waits at the gate; the
+        // start goes on and fails, with no caller left to see it.
+        let (cancel, rx) = watch::channel(false);
+        let first = {
+            let client = Arc::clone(&client);
+            let root = root.clone();
+            tokio::spawn(async move {
+                client
+                    .ensure_server("fake", &root, &fake_profile("die-on-initialize", &root), rx)
+                    .await
+            })
+        };
+        began.acquire().await.unwrap().forget();
+        cancel.send(true).unwrap();
+        gate.release(1);
+        assert_eq!(first.await.unwrap().unwrap_err(), LspClientError::Aborted);
+        let entry = server_entry(&client, &root);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while entry
+            .status
+            .lock()
+            .unwrap()
+            .unreported_start_error
+            .is_none()
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the start never failed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // A call that is already cancelled leaves the failure alone.
+        let (_tx, cancelled) = watch::channel(true);
+        assert_eq!(
+            client
+                .ensure_server(
+                    "fake",
+                    &root,
+                    &fake_profile("well-behaved", &root),
+                    cancelled
+                )
+                .await
+                .unwrap_err(),
+            LspClientError::Aborted
+        );
+        // The next call gets it.
+        let (_tx, rx) = watch::channel(false);
+        let r = client
+            .ensure_server("fake", &root, &fake_profile("well-behaved", &root), rx)
+            .await;
+        assert!(
+            matches!(&r, Err(e) if e.to_string().contains("exited with code 3")),
+            "the deferred start failure was lost: {r:?}"
         );
         client.close_session().await;
     }
