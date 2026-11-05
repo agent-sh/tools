@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,6 +74,46 @@ async function goneWithin(pid: number, ms: number): Promise<boolean> {
     await settle(20);
   }
   return true;
+}
+
+/** Runs exit-host.mjs to its end. A host still running after 20s is killed. */
+function runHost(args: string[]): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    execFile(
+      process.execPath,
+      ["--import", TS_HOOKS, EXIT_HOST, ...args],
+      { timeout: 20_000, killSignal: "SIGKILL" },
+      (err) => (err ? reject(err) : resolve()),
+    );
+  });
+}
+
+/**
+ * SIGKILL the process group that the fake server in `stateDir` leads, but
+ * only while a member of it is still a process this test started: the
+ * server, whose command line names `stateDir`, or its child, which runs the
+ * fixture's child script. A group id stays taken while any member lives, so
+ * it cannot belong to anyone else then.
+ */
+function killFakeGroup(stateDir: string): void {
+  const pidFile = path.join(stateDir, "pid");
+  if (!existsSync(pidFile)) return;
+  const group = Number(readFileSync(pidFile, "utf8"));
+  const ps = execFileSync("ps", ["-A", "-ww", "-o", "pid=,pgid=,command="], { encoding: "utf8" });
+  const ours = ps.split("\n").some((line) => {
+    const m = /^\s*\d+\s+(\d+)\s+(.*)$/.exec(line);
+    return (
+      m !== null &&
+      Number(m[1]) === group &&
+      (m[2]!.includes(stateDir) || m[2]!.includes("setInterval(() => {}, 60000)"))
+    );
+  });
+  if (!ours) return;
+  try {
+    process.kill(-group, "SIGKILL");
+  } catch {
+    // The group emptied since.
+  }
 }
 
 function isAlive(pid: number): boolean {
@@ -257,24 +297,38 @@ describe("spawn client: closeSession", () => {
   it("kills each live server's group when the host exits without closeSession", async () => {
     // A real host process: after process.exit() no event loop runs, so only
     // the exit handler itself can stop the server and its child.
-    await new Promise<void>((resolve, reject) => {
-      execFile(process.execPath, ["--import", TS_HOOKS, EXIT_HOST, root], { timeout: 20_000 }, (err) =>
-        err ? reject(err) : resolve(),
-      );
-    });
-    const pid = serverPid(root);
-    const child = await childPid(root);
+    let ok = false;
     try {
+      await runHost([root]);
+      const pid = serverPid(root);
+      const child = await childPid(root);
       expect(await goneWithin(pid, 1_000)).toBe(true);
       expect(await goneWithin(child, 1_000)).toBe(true);
+      ok = true;
     } finally {
-      for (const p of [pid, child]) {
-        try {
-          process.kill(p, "SIGKILL");
-        } catch {
-          // Already gone.
-        }
+      // Only a failed run can leave the server or its child behind.
+      if (!ok) killFakeGroup(root);
+    }
+  });
+
+  it("keeps a live server covered when another client closes its session", async () => {
+    const closedRoot = makeTempDir("lsp-spawn-closed-");
+    let ok = false;
+    try {
+      // The second client closes while the first one's server still runs.
+      await runHost([root, closedRoot]);
+      expect(existsSync(path.join(closedRoot, "exit"))).toBe(true);
+      const pid = serverPid(root);
+      const child = await childPid(root);
+      expect(await goneWithin(pid, 1_000)).toBe(true);
+      expect(await goneWithin(child, 1_000)).toBe(true);
+      ok = true;
+    } finally {
+      if (!ok) {
+        killFakeGroup(root);
+        killFakeGroup(closedRoot);
       }
+      rmSync(closedRoot, { recursive: true, force: true });
     }
   });
 

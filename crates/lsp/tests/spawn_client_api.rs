@@ -96,6 +96,35 @@ async fn initialize_is_bounded_and_the_server_is_stopped() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn running_finds_a_live_server_at_any_terminal_width() {
+    common::bounded(async {
+        let fake = Fake::new();
+        let client = client_with_limit(5_000);
+        client
+            .ensure_server(
+                "fake",
+                &fake.root,
+                &fake.profile("well-behaved"),
+                never_cancelled(),
+            )
+            .await
+            .unwrap();
+        let pid = fake.wait_pid().await.expect("the server never started");
+        // The fake's command line is longer than either width.
+        for columns in [None, Some("80"), Some("20")] {
+            assert_eq!(
+                fake.running_at_width(columns),
+                vec![pid],
+                "running() missed the live server with COLUMNS={columns:?}"
+            );
+        }
+        client.close_session().await;
+        assert_eq!(fake.running(), Vec::<i32>::new());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_start_that_misses_the_limit_after_its_call_gave_up_is_reported_once() {
     common::bounded(async {
         let fake = Fake::new();

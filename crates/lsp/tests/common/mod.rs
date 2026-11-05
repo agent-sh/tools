@@ -158,11 +158,20 @@ impl Fake {
     /// whether or not node got as far as writing a pid, plus any server
     /// that wrote one and is a zombie not yet reaped.
     pub fn running(&self) -> Vec<i32> {
+        self.running_at_width(None)
+    }
+
+    /// `running()`, with `ps` run under `COLUMNS=columns` when given.
+    pub fn running_at_width(&self, columns: Option<&str>) -> Vec<i32> {
         // `ps` works the same on Linux and macOS: pid, state, command line.
-        let out = std::process::Command::new("ps")
-            .args(["-A", "-o", "pid=,stat=,command="])
-            .output()
-            .expect("run ps");
+        // `-ww`: never cut the command line, even when `COLUMNS` is set,
+        // which procps applies to piped output too.
+        let mut ps = std::process::Command::new("ps");
+        ps.args(["-A", "-ww", "-o", "pid=,stat=,command="]);
+        if let Some(columns) = columns {
+            ps.env("COLUMNS", columns);
+        }
+        let out = ps.output().expect("run ps");
         let mut found = Vec::new();
         for line in String::from_utf8_lossy(&out.stdout).lines() {
             let mut fields = line.split_whitespace();
