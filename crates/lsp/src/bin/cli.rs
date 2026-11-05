@@ -4,10 +4,12 @@ use harness_core::{PermissionPolicy, ToolError, ToolErrorCode};
 use harness_lsp::{lsp, LspClient, LspPermissionPolicy, LspSessionConfig, SpawnLspClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::BufRead;
+#[cfg(debug_assertions)]
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Deserialize)]
 struct Request {
@@ -93,10 +95,12 @@ impl SessionSpec {
     }
 }
 
-/// Test hook: when set to a directory, the CLI pauses at the end of its
-/// input, before the close, until `resume` exists there, and writes
-/// `paused` there once it waits. Tests use it to send a signal at that
-/// point.
+/// Test hook, in debug builds only: when set to a directory, the CLI pauses
+/// at the end of its input, before the close, until `resume` exists there.
+/// It writes `paused` there once it waits, and `signalled` once a SIGTERM
+/// has reached the runtime. Tests use it to send a signal while no wait
+/// polls for one. A release build ignores it.
+#[cfg(debug_assertions)]
 const PAUSE_DIR_ENV: &str = "HARNESS_LSP_CLI_TEST_PAUSE_DIR";
 
 fn main() {
@@ -113,8 +117,9 @@ fn main() {
     let code = runtime.block_on(run());
     // Shutting the runtime down drops every task, so each server's watcher
     // kills the server's process group: that still stops every server, and
-    // its children, when a second stop signal cut the close short. Bounded,
-    // since a blocking read of stdin may still be waiting.
+    // its children, when a second stop signal cut the close short. stdin is
+    // read on a thread of its own (see `serve`), so nothing here waits for
+    // it; the bound covers a task that never yields.
     runtime.shutdown_timeout(Duration::from_millis(500));
     std::process::exit(code);
 }
@@ -129,6 +134,7 @@ async fn run() -> i32 {
         r = serve() => (r, None),
         s = signals.recv() => (Ok(()), Some(s)),
     };
+    #[cfg(debug_assertions)]
     if signal.is_none() {
         if let Some(dir) = std::env::var_os(PAUSE_DIR_ENV) {
             pause(Path::new(&dir)).await;
@@ -162,10 +168,30 @@ async fn run() -> i32 {
     }
 }
 
+#[cfg(debug_assertions)]
 async fn pause(dir: &Path) {
+    // A stream of its own, so the hook sees the signal without taking it
+    // from the streams `run` waits on.
+    #[cfg(unix)]
+    let mut probe = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    #[cfg(not(unix))]
+    let mut probe: Option<()> = None;
     let _ = std::fs::write(dir.join("paused"), "");
     while !dir.join("resume").exists() {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        let tick = tokio::time::sleep(Duration::from_millis(10));
+        #[cfg(unix)]
+        if let Some(stream) = probe.as_mut() {
+            tokio::select! {
+                Some(()) = stream.recv() => {
+                    let _ = std::fs::write(dir.join("signalled"), "");
+                    probe = None;
+                }
+                _ = tick => {}
+            }
+            continue;
+        }
+        let _ = &mut probe;
+        tick.await;
     }
 }
 
@@ -225,12 +251,23 @@ impl StopSignals {
 }
 
 async fn serve() -> std::io::Result<()> {
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin).lines();
-    let mut stdout = stdout;
+    // stdin is read on a plain thread, not in tokio's blocking pool: a read
+    // that never returns would otherwise hold the runtime shutdown in
+    // `main` for its whole bound after a stop signal.
+    let (lines_tx, mut lines) = tokio::sync::mpsc::channel::<std::io::Result<String>>(16);
+    std::thread::Builder::new()
+        .name("lsp-cli-stdin".to_string())
+        .spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                if lines_tx.blocking_send(line).is_err() {
+                    break;
+                }
+            }
+        })?;
+    let mut stdout = tokio::io::stdout();
 
-    while let Some(line) = reader.next_line().await? {
+    while let Some(line) = lines.recv().await {
+        let line = line?;
         if line.trim().is_empty() {
             continue;
         }

@@ -1,9 +1,9 @@
 //! `harness-lsp-cli` stops its language servers when it exits. Each server
 //! runs in its own process group, so a signal sent to the CLI, or to the
 //! CLI's group, never reaches the server or its children: the CLI has to
-//! stop them itself. Needs `node` on PATH. Linux only: liveness checks read
-//! `/proc`.
-#![cfg(target_os = "linux")]
+//! stop them itself. Needs `node` on PATH. Unix only: liveness checks use
+//! `kill(pid, 0)`, and processes are found with `ps`.
+#![cfg(unix)]
 
 mod common;
 
@@ -184,6 +184,18 @@ async fn a_stop_signal_right_after_end_of_input_still_lets_the_close_finish() {
     .await;
 }
 
+/// Waits for `name` in `dir`, up to 10s.
+async fn wait_for(dir: &Path, name: &str, what: &str) {
+    let path = dir.join(name);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(tokio::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+// The pause hook exists in debug builds only.
+#[cfg(debug_assertions)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stop_signal_before_the_close_begins_is_kept() {
     common::bounded(async {
@@ -198,18 +210,15 @@ async fn a_stop_signal_before_the_close_begins_is_kept() {
         drop(cli.stdin.take());
         // The CLI has seen the end of its input and waits before the close,
         // with no wait for a signal running.
-        let paused = pause.path().join("paused");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while !paused.exists() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the CLI never paused"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_for(pause.path(), "paused", "the CLI never paused").await;
         send(&cli, "TERM");
-        // Long enough for the runtime to take the signal while it waits.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The runtime has taken the signal, before any wait could.
+        wait_for(
+            pause.path(),
+            "signalled",
+            "the SIGTERM never reached the CLI",
+        )
+        .await;
         std::fs::write(pause.path().join("resume"), "").unwrap();
         assert_eq!(exit_code(&mut cli).await, Some(143), "the SIGTERM was lost");
         assert_stopped(&fake, &cli);
@@ -230,7 +239,13 @@ async fn a_second_stop_signal_cuts_the_close_short_and_still_stops_every_server(
         let mut cli = cli_with_a_server(&fake, "stubborn-with-child").await;
         let first = tokio::time::Instant::now();
         send(&cli, "TERM");
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The close has begun: the server has read `shutdown`.
+        wait_for(
+            Path::new(&fake.root),
+            "got-shutdown",
+            "the close never began",
+        )
+        .await;
         send(&cli, "INT");
         assert_eq!(exit_code(&mut cli).await, Some(130));
         let took = first.elapsed();
@@ -246,6 +261,53 @@ async fn a_second_stop_signal_cuts_the_close_short_and_still_stops_every_server(
             gone_within(cli.child, Duration::from_secs(1)).await,
             "the server's child outlived the CLI"
         );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_signal_exit_does_not_wait_for_the_stdin_reader() {
+    common::bounded(async {
+        let mut process = Command::new(env!("CARGO_BIN_EXE_harness-lsp-cli"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn harness-lsp-cli");
+        let mut stdin = process.stdin.take().unwrap();
+        let mut stdout = BufReader::new(process.stdout.take().unwrap());
+        // Any reply shows the CLI is serving, with its signals set up.
+        stdin.write_all(b"{}\n").await.unwrap();
+        stdin.flush().await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(15), stdout.read_line(&mut line))
+            .await
+            .expect("no reply from the CLI")
+            .unwrap();
+        // stdin stays open, so the reader is still waiting for a line. No
+        // server runs, so the close has nothing to wait for.
+        let pid = process.id().unwrap().to_string();
+        let sent = tokio::time::Instant::now();
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let code = tokio::time::timeout(Duration::from_secs(15), process.wait())
+            .await
+            .expect("the CLI did not exit")
+            .unwrap()
+            .code();
+        let took = sent.elapsed();
+        assert_eq!(code, Some(143));
+        // The runtime shutdown is bounded at 500ms; it waits all of it for
+        // a reader in tokio's blocking pool.
+        assert!(
+            took < Duration::from_millis(300),
+            "the exit took {took:?}, so it waited for the stdin reader"
+        );
+        drop(stdin);
     })
     .await;
 }

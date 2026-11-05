@@ -69,6 +69,31 @@ const TIMED_OUT = Symbol("timed out");
  */
 const OWN_GROUP = process.platform !== "win32";
 
+/**
+ * Servers of every client whose process has not exited yet, retired ones
+ * included. While there is one, a single `process` exit handler kills each
+ * one's process group, so a host that exits without `closeSession` leaves
+ * no server or child behind, as a Rust runtime that shuts down does. The
+ * handler is shared by all clients, so any number of them adds one
+ * listener, and it goes once the last live server has exited, so
+ * `closeSession` removes it. Hosts still handle SIGINT and SIGTERM
+ * themselves: the library installs no signal handler.
+ */
+const liveServers = new Set<ChildProcess>();
+
+function killLiveGroups(): void {
+  for (const proc of liveServers) signalServer(proc, "SIGKILL");
+}
+
+function trackLive(proc: ChildProcess): void {
+  if (liveServers.size === 0) process.once("exit", killLiveGroups);
+  liveServers.add(proc);
+  proc.once("exit", () => {
+    liveServers.delete(proc);
+    if (liveServers.size === 0) process.off("exit", killLiveGroups);
+  });
+}
+
 export interface SpawnLspClientOptions {
   /**
    * Bound for the `initialize` handshake, in ms. Defaults to
@@ -113,29 +138,6 @@ export function createSpawnLspClient(
   const servers = new Map<string, ServerEntry>();
   /** Stops of retired servers, which may no longer be in `servers`. */
   const stops = new Set<Promise<void>>();
-  /**
-   * Servers whose process has not exited yet, retired ones included. While
-   * there is one, a `process` exit handler kills each one's process group,
-   * so a host that exits without `closeSession` leaves no server or child
-   * behind, as a Rust runtime that shuts down does. The handler goes once
-   * the last of them has exited, so `closeSession` removes it. Hosts still
-   * handle SIGINT and SIGTERM themselves: the library installs no signal
-   * handler.
-   */
-  const live = new Set<ChildProcess>();
-  const killLiveGroups = (): void => {
-    for (const proc of live) signalServer(proc, "SIGKILL");
-  };
-
-  function track(proc: ChildProcess): void {
-    if (live.size === 0) process.once("exit", killLiveGroups);
-    live.add(proc);
-    proc.once("exit", () => {
-      live.delete(proc);
-      if (live.size === 0) process.off("exit", killLiveGroups);
-    });
-  }
-
   function key(language: string, root: string): string {
     return `${language}|${root}`;
   }
@@ -282,7 +284,7 @@ export function createSpawnLspClient(
       detached: OWN_GROUP,
     });
     // A failed spawn has no pid and never exits.
-    if (proc.pid !== undefined) track(proc);
+    if (proc.pid !== undefined) trackLive(proc);
 
     // Drain stderr: once the pipe fills, a server that keeps writing to it
     // blocks. Keep only a bounded tail, for the exit error.

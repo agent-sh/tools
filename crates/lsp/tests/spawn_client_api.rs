@@ -1,7 +1,7 @@
 //! Spawn-client tests that need the lifecycle API: the `initialize` limit
 //! option, the session cancel signal and `ensure_server`'s cancel. Same
 //! fake server as `spawn_client.rs`.
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 mod common;
 

@@ -158,23 +158,24 @@ impl Fake {
     /// whether or not node got as far as writing a pid, plus any server
     /// that wrote one and is a zombie not yet reaped.
     pub fn running(&self) -> Vec<i32> {
+        // `ps` works the same on Linux and macOS: pid, state, command line.
+        let out = std::process::Command::new("ps")
+            .args(["-A", "-o", "pid=,stat=,command="])
+            .output()
+            .expect("run ps");
         let mut found = Vec::new();
-        for p in fs::read_dir("/proc").into_iter().flatten().flatten() {
-            let Some(pid) = p.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let mut fields = line.split_whitespace();
+            let (Some(pid), Some(stat)) = (fields.next(), fields.next()) else {
                 continue;
             };
-            let cmdline = fs::read(p.path().join("cmdline")).unwrap_or_default();
-            let cmdline = String::from_utf8_lossy(&cmdline);
-            let zombie = fs::read_to_string(p.path().join("stat"))
-                .map(|s| {
-                    s.rsplit(')')
-                        .next()
-                        .unwrap_or("")
-                        .trim_start()
-                        .starts_with('Z')
-                })
-                .unwrap_or(false);
-            let ours = cmdline.contains(FAKE_SERVER) && cmdline.contains(&self.root);
+            let Ok(pid) = pid.parse::<i32>() else {
+                continue;
+            };
+            let command: Vec<&str> = fields.collect();
+            let command = command.join(" ");
+            let ours = command.contains(FAKE_SERVER) && command.contains(&self.root);
+            let zombie = stat.starts_with('Z');
             if ours || (zombie && self.spawned_pids().contains(&pid)) {
                 found.push(pid);
             }
@@ -247,7 +248,8 @@ pub fn code_and_message(r: &LspResult) -> Option<(ToolErrorCode, String)> {
 
 /// True while the process exists, a zombie not yet reaped included.
 pub fn alive(pid: i32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 /// Wait until the process is gone, up to `limit`. True when it is gone.

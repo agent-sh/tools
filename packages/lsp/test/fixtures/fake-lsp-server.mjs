@@ -45,10 +45,10 @@
 //   close-stdout-on-hover      closes its stdout instead of answering
 //                              `textDocument/hover`, and stays alive until
 //                              signalled.
-//   hold-shutdown-reply        writes STATE_DIR/got-shutdown when it reads
-//                              `shutdown`, stops reading its stdin, and
-//                              answers only once STATE_DIR/reply-shutdown
-//                              exists; stays alive until signalled.
+//   hold-shutdown-reply        stops reading its stdin when it reads
+//                              `shutdown`, and answers only once
+//                              STATE_DIR/reply-shutdown exists; stays alive
+//                              until signalled.
 //
 // Any MODE may end in `-with-child`: the server then starts a child process
 // that ignores SIGTERM and writes its pid to STATE_DIR/child-pid. With
@@ -57,7 +57,8 @@
 // STATE_DIR/child-exit.
 //
 // Every mode appends its pid to STATE_DIR/spawns at startup, and the URI of
-// each `textDocument/didOpen` it reads to STATE_DIR/didopen.
+// each `textDocument/didOpen` it reads to STATE_DIR/didopen. Every mode
+// writes STATE_DIR/got-shutdown when it reads `shutdown`.
 
 import { spawn } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, writeFileSync } from "node:fs";
@@ -175,10 +176,10 @@ function handle(message) {
       send({ id: message.id, result: { contents: "fake hover" } });
       return;
     case "shutdown":
+      writeFileSync(path.join(stateDir, "got-shutdown"), "");
       if (mode === "die-on-shutdown") process.exit(0);
       if (mode === "close-stdin-on-shutdown") closeStdin();
       if (mode === "hold-shutdown-reply") {
-        writeFileSync(path.join(stateDir, "got-shutdown"), "");
         process.stdin.pause();
         const marker = path.join(stateDir, "reply-shutdown");
         const poll = setInterval(() => {

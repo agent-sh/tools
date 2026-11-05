@@ -1,13 +1,13 @@
 //! Spawn-client lifecycle tests against a real child process. They use the
 //! same fake stdio server as the TypeScript tests
 //! (`packages/lsp/test/fixtures/fake-lsp-server.mjs`), so both ports run
-//! the same cases. Needs `node` on PATH. Linux only: liveness checks read
-//! `/proc`.
+//! the same cases. Needs `node` on PATH. Unix only: liveness checks use
+//! `kill(pid, 0)`, and processes are found with `ps`.
 //!
 //! These tests use only the API both before and after the lifecycle work
 //! (`lsp`, `SpawnLspClient::new`, `close_session`); the ones that need the
 //! new API are in `spawn_client_api.rs`.
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 mod common;
 

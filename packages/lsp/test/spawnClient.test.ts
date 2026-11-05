@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,9 @@ import { makeSession, makeTempDir, write } from "./helpers.js";
 const FAKE_SERVER = fileURLToPath(
   new URL("./fixtures/fake-lsp-server.mjs", import.meta.url),
 );
+// A host process that loads this package's source: see the fixtures.
+const TS_HOOKS = fileURLToPath(new URL("./fixtures/ts-hooks.mjs", import.meta.url));
+const EXIT_HOST = fileURLToPath(new URL("./fixtures/exit-host.mjs", import.meta.url));
 
 type FakeMode =
   | "well-behaved"
@@ -251,28 +255,54 @@ describe("spawn client: closeSession", () => {
   }, 15_000);
 
   it("kills each live server's group when the host exits without closeSession", async () => {
-    const before = process.listeners("exit");
-    const client = createSpawnLspClient();
-    // Exits on `exit`; its child ignores SIGTERM and never exits.
-    await client.ensureServer({
-      language: "fake",
-      root,
-      profile: fakeProfile("well-behaved-with-child", root),
+    // A real host process: after process.exit() no event loop runs, so only
+    // the exit handler itself can stop the server and its child.
+    await new Promise<void>((resolve, reject) => {
+      execFile(process.execPath, ["--import", TS_HOOKS, EXIT_HOST, root], { timeout: 20_000 }, (err) =>
+        err ? reject(err) : resolve(),
+      );
     });
     const pid = serverPid(root);
     const child = await childPid(root);
-    const added = process.listeners("exit").filter((l) => !before.includes(l));
-    expect(added).toHaveLength(1);
-
-    // What Node runs when the host calls process.exit() without closeSession.
-    (added[0] as () => void)();
-
-    expect(await goneWithin(pid, 1_000)).toBe(true);
-    expect(await goneWithin(child, 1_000)).toBe(true);
-    // The server has exited, so the handler is gone.
-    await expect.poll(() => process.listeners("exit").includes(added[0]!)).toBe(false);
-    await client.closeSession();
+    try {
+      expect(await goneWithin(pid, 1_000)).toBe(true);
+      expect(await goneWithin(child, 1_000)).toBe(true);
+    } finally {
+      for (const p of [pid, child]) {
+        try {
+          process.kill(p, "SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }
+    }
   });
+
+  it("shares one exit handler among all clients", async () => {
+    const before = process.listeners("exit").length;
+    const warnings: Error[] = [];
+    const onWarning = (w: Error): void => {
+      warnings.push(w);
+    };
+    process.on("warning", onWarning);
+    const clients = Array.from({ length: 20 }, () => createSpawnLspClient());
+    try {
+      for (const client of clients) {
+        await client.ensureServer({
+          language: "fake",
+          root,
+          profile: fakeProfile("well-behaved", root),
+        });
+      }
+      expect(process.listeners("exit").length - before).toBeLessThanOrEqual(1);
+      await settle();
+      expect(warnings.filter((w) => w.name === "MaxListenersExceededWarning")).toEqual([]);
+    } finally {
+      process.off("warning", onWarning);
+      await Promise.all(clients.map((c) => c.closeSession()));
+    }
+    expect(process.listeners("exit").length).toBe(before);
+  }, 30_000);
 
   it("removes its exit handler once closeSession has stopped every server", async () => {
     const before = process.listeners("exit");

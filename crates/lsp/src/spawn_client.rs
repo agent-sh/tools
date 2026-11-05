@@ -127,7 +127,7 @@ struct ServerEntry {
     stops: Arc<StdMutex<Vec<JoinHandle<()>>>>,
     /// Test record: whether the exited server was still unreaped when the
     /// watcher killed its group.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     unreaped_at_group_kill: StdMutex<Option<bool>>,
 }
 
@@ -699,10 +699,12 @@ async fn reap(
         let exited = rx.await.unwrap_or(false);
         *notice = None;
         if exited {
-            #[cfg(test)]
+            // Signal 0 finds a zombie too: unreaped means it still exists.
+            #[cfg(all(test, unix))]
             if let Some(pid) = group.0 {
+                // SAFETY: signal 0 only checks that the process exists.
                 *entry.unreaped_at_group_kill.lock().unwrap() =
-                    Some(Path::new(&format!("/proc/{pid}")).exists());
+                    Some(unsafe { libc::kill(pid as libc::pid_t, 0) } == 0);
             }
             group.kill();
         }
@@ -1148,7 +1150,7 @@ impl SpawnLspClient {
             opened: StdMutex::new(HashMap::new()),
             stderr: Arc::new(StdMutex::new(Vec::new())),
             stops: Arc::clone(&self.stops),
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             unreaped_at_group_kill: StdMutex::new(None),
         });
 
@@ -1600,7 +1602,9 @@ impl LspClient for SpawnLspClient {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+/// Spawn-client tests against the fake server. They check processes with
+/// pid files and `kill(pid, 0)`, so they run on every Unix, macOS included.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -1781,8 +1785,15 @@ mod tests {
         }
     }
 
+    /// True while the process exists, a zombie not yet reaped included.
     fn alive(pid: i32) -> bool {
-        Path::new(&format!("/proc/{pid}")).exists()
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn signal(pid: i32, sig: libc::c_int) {
+        // SAFETY: kill(2) on a process this test started.
+        assert_eq!(unsafe { libc::kill(pid, sig) }, 0);
     }
 
     async fn gone_within(pid: i32, limit: Duration) -> bool {
@@ -2287,47 +2298,6 @@ mod tests {
             panic!("the stress run did not finish");
         }
     }
-}
-
-/// Tests that need no `/proc`, so they run on every Unix, macOS included.
-#[cfg(all(test, unix))]
-mod unix_tests {
-    use super::*;
-
-    const FAKE_SERVER: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../packages/lsp/test/fixtures/fake-lsp-server.mjs"
-    );
-
-    /// True while the process exists, a zombie not yet reaped included.
-    fn alive(pid: i32) -> bool {
-        // SAFETY: signal 0 only checks that the process exists.
-        unsafe { libc::kill(pid, 0) == 0 }
-    }
-
-    fn signal(pid: i32, sig: libc::c_int) {
-        // SAFETY: kill(2) on a process this test started.
-        assert_eq!(unsafe { libc::kill(pid, sig) }, 0);
-    }
-
-    async fn read_pid(root: &str, name: &str) -> i32 {
-        let path = Path::new(root).join(name);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(pid) = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| s.trim().parse().ok())
-            {
-                return pid;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "{} never appeared",
-                path.display()
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stopped_server_is_not_taken_for_an_exited_one() {
@@ -2338,35 +2308,17 @@ mod unix_tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let profile = LspServerProfile {
-            language: "fake".to_string(),
-            extensions: vec![".fake".to_string()],
-            command: vec![
-                "node".to_string(),
-                FAKE_SERVER.to_string(),
-                "well-behaved-with-child".to_string(),
-                root.clone(),
-            ],
-            root_patterns: None,
-            initialization_options: None,
-        };
+        let profile = fake_profile("well-behaved-with-child", &root);
         let client = SpawnLspClient::new();
         let (_tx, rx) = watch::channel(false);
         client
             .ensure_server("fake", &root, &profile, rx)
             .await
             .unwrap();
-        let entry = match client
-            .servers
-            .lock()
-            .unwrap()
-            .get(&SpawnLspClient::key("fake", &root))
-        {
-            Some(Slot::Server(entry)) => Arc::clone(entry),
-            _ => panic!("no server for the key"),
-        };
-        let server = read_pid(&root, "pid").await;
-        let child = read_pid(&root, "child-pid").await;
+        let entry = server_entry(&client, &root);
+        let server = read_pid(&root, "pid");
+        wait_for_file(&Path::new(&root).join("child-pid")).await;
+        let child = read_pid(&root, "child-pid");
         signal(server, libc::SIGSTOP);
         // A watcher that takes the stop for an exit kills the group at once.
         tokio::time::sleep(Duration::from_millis(500)).await;
