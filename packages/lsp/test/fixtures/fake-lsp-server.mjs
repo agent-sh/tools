@@ -45,15 +45,34 @@
 //   close-stdout-on-hover      closes its stdout instead of answering
 //                              `textDocument/hover`, and stays alive until
 //                              signalled.
+//   hold-shutdown-reply        writes STATE_DIR/got-shutdown when it reads
+//                              `shutdown`, stops reading its stdin, and
+//                              answers only once STATE_DIR/reply-shutdown
+//                              exists; stays alive until signalled.
+//
+// Any MODE may end in `-with-child`: the server then starts a child process
+// that ignores SIGTERM and writes its pid to STATE_DIR/child-pid.
 //
 // Every mode appends its pid to STATE_DIR/spawns at startup, and the URI of
 // each `textDocument/didOpen` it reads to STATE_DIR/didopen.
 
-import { appendFileSync, closeSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { appendFileSync, closeSync, existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-const [mode = "well-behaved", stateDir] = process.argv.slice(2);
+const [requested = "well-behaved", stateDir] = process.argv.slice(2);
 if (!stateDir) throw new Error("usage: fake-lsp-server.mjs MODE STATE_DIR");
+const withChild = requested.endsWith("-with-child");
+const mode = withChild ? requested.slice(0, -"-with-child".length) : requested;
+
+if (withChild) {
+  const child = spawn(
+    process.execPath,
+    ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 60000);"],
+    { stdio: "ignore" },
+  );
+  writeFileSync(path.join(stateDir, "child-pid"), String(child.pid));
+}
 
 // Larger than any pipe or socket buffer, so the write only completes if the
 // client keeps reading stderr.
@@ -67,6 +86,7 @@ appendFileSync(path.join(stateDir, "spawns"), `${process.pid}\n`);
 const keepAlive = [
   "stop-reading-after-initialize",
   "stop-reading-after-shutdown",
+  "hold-shutdown-reply",
   "stubborn",
 ];
 if (mode.startsWith("close-std") || keepAlive.includes(mode)) {
@@ -152,6 +172,17 @@ function handle(message) {
     case "shutdown":
       if (mode === "die-on-shutdown") process.exit(0);
       if (mode === "close-stdin-on-shutdown") closeStdin();
+      if (mode === "hold-shutdown-reply") {
+        writeFileSync(path.join(stateDir, "got-shutdown"), "");
+        process.stdin.pause();
+        const marker = path.join(stateDir, "reply-shutdown");
+        const poll = setInterval(() => {
+          if (!existsSync(marker)) return;
+          clearInterval(poll);
+          send({ id: message.id, result: null });
+        }, 10);
+        return;
+      }
       if (mode === "stop-reading-after-shutdown") {
         process.stdin.pause();
         // Give the client time to queue more writes before `exit`.
