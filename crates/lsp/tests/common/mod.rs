@@ -4,7 +4,7 @@
 
 use harness_core::{PermissionPolicy, ToolErrorCode};
 use harness_lsp::{
-    LspClient, LspManifest, LspPermissionPolicy, LspResult, LspServerProfile, LspSessionConfig,
+    lsp, LspClient, LspManifest, LspPermissionPolicy, LspResult, LspServerProfile, LspSessionConfig,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -24,7 +24,32 @@ pub const FAKE_SERVER: &str = concat!(
 /// the run.
 pub const TEST_LIMIT: Duration = Duration::from_secs(20);
 
+/// A new child process holds a copy of every pipe end its parent had open
+/// when it was created, until it execs. So a server that another test
+/// spawns while this test's server starts can hold this server's stdin
+/// open, and under load it can hold it for longer than this server takes
+/// to start. A write after this server closed its stdin then succeeds
+/// instead of failing. Tests that need that write to fail run alone, with
+/// `bounded_alone`; every other test holds `SPAWNS` shared.
+static SPAWNS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
 pub async fn bounded<F: Future<Output = ()>>(test: F) {
+    let _shared = SPAWNS.read().await;
+    limit(test).await;
+}
+
+/// The shared hold `bounded` takes, for a test with its own limit.
+pub async fn shared_spawns() -> tokio::sync::RwLockReadGuard<'static, ()> {
+    SPAWNS.read().await
+}
+
+/// `bounded`, with no other test of this binary running meanwhile.
+pub async fn bounded_alone<F: Future<Output = ()>>(test: F) {
+    let _alone = SPAWNS.write().await;
+    limit(test).await;
+}
+
+async fn limit<F: Future<Output = ()>>(test: F) {
     if tokio::time::timeout(TEST_LIMIT, test).await.is_err() {
         panic!("test did not finish within {TEST_LIMIT:?}");
     }
@@ -121,6 +146,20 @@ impl Fake {
             .unwrap_or(0)
     }
 
+    /// `spawns()` once it reaches `n`, or after 5s. A server records its
+    /// spawn once node has started, which under load can be well after the
+    /// call that spawned it gave up.
+    pub async fn spawns_reaching(&self, n: usize) -> usize {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let count = self.spawns();
+            if count >= n || tokio::time::Instant::now() >= deadline {
+                return count;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// Pids of every server started in this dir, in start order.
     pub fn spawned_pids(&self) -> Vec<i32> {
         fs::read_to_string(Path::new(&self.root).join("spawns"))
@@ -136,6 +175,20 @@ impl Fake {
 
     pub fn exists(&self, name: &str) -> bool {
         Path::new(&self.root).join(name).exists()
+    }
+}
+
+/// Calls `lsp` until the server is past its start, up to 10s, and returns
+/// the first other result. Under load node can take longer to start than
+/// the fake server's own delays, so a fixed pause is not enough.
+pub async fn past_start(input: Value, session: &LspSessionConfig) -> LspResult {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let r = lsp(input.clone(), session).await;
+        if !matches!(r, LspResult::ServerStarting(_)) || tokio::time::Instant::now() >= deadline {
+            return r;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

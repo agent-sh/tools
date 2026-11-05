@@ -103,9 +103,7 @@ async fn a_start_that_misses_the_limit_after_its_call_gave_up_is_reported_once()
         let session = fake.session(client.clone(), "silent-on-initialize", Some(300));
         let (code, _) = code_and_message(&lsp(hover_input(&file), &session).await).expect("an error");
         assert_eq!(code, ToolErrorCode::Timeout);
-        // Past the 800ms limit, with room for a slow machine.
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-        let r = lsp(hover_input(&file), &session).await;
+        let r = common::past_start(hover_input(&file), &session).await;
         let (code, msg) = code_and_message(&r).expect("an error");
         assert_eq!(code, ToolErrorCode::ServerNotAvailable, "{msg}");
         assert!(
@@ -115,7 +113,7 @@ async fn a_start_that_misses_the_limit_after_its_call_gave_up_is_reported_once()
         assert_eq!(fake.spawns(), 1);
         let (code, _) = code_and_message(&lsp(hover_input(&file), &session).await).expect("an error");
         assert_eq!(code, ToolErrorCode::Timeout);
-        assert_eq!(fake.spawns(), 2);
+        assert_eq!(fake.spawns_reaching(2).await, 2);
         client.close_session().await;
     })
     .await;
@@ -310,8 +308,7 @@ async fn a_cancel_during_the_start_says_so_and_the_start_goes_on() {
         let r = lsp(hover_input(&file), &session).await;
         assert!(matches!(r, LspResult::ServerStarting(_)), "{r:?}");
         // The server answers initialize after 800ms; then the same one serves.
-        tokio::time::sleep(Duration::from_millis(1_000)).await;
-        let r = lsp(hover_input(&file), &session).await;
+        let r = common::past_start(hover_input(&file), &session).await;
         assert!(matches!(r, LspResult::Hover(_)), "{r:?}");
         assert_eq!(fake.spawns(), 1);
         inner.close_session().await;

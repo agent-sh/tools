@@ -89,8 +89,7 @@ async fn a_slow_start_outlives_the_call_then_server_starting_then_the_result() {
         );
         let r = lsp(hover_input(&file), &session).await;
         assert!(matches!(r, LspResult::ServerStarting(_)), "{r:?}");
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        let r = lsp(hover_input(&file), &session).await;
+        let r = common::past_start(hover_input(&file), &session).await;
         assert!(matches!(r, LspResult::Hover(_)), "{r:?}");
         assert_eq!(fake.spawns(), 1);
         client.close_session().await;
@@ -109,8 +108,7 @@ async fn a_start_that_exits_after_its_call_gave_up_is_reported_once() {
         let (code, _) =
             code_and_message(&lsp(hover_input(&file), &session).await).expect("an error");
         assert_eq!(code, ToolErrorCode::Timeout);
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-        let r = lsp(hover_input(&file), &session).await;
+        let r = common::past_start(hover_input(&file), &session).await;
         let (code, msg) = code_and_message(&r).expect("an error");
         assert_eq!(code, ToolErrorCode::ServerNotAvailable, "{msg}");
         assert!(msg.contains("exited with code 3"), "{msg}");
@@ -120,7 +118,7 @@ async fn a_start_that_exits_after_its_call_gave_up_is_reported_once() {
         let (code, _) =
             code_and_message(&lsp(hover_input(&file), &session).await).expect("an error");
         assert_eq!(code, ToolErrorCode::Timeout);
-        assert_eq!(fake.spawns(), 2);
+        assert_eq!(fake.spawns_reaching(2).await, 2);
         client.close_session().await;
     })
     .await;
@@ -139,6 +137,9 @@ async fn an_idle_exit_is_replaced_by_the_next_call() {
         ));
         let first = fake.pid();
         common::kill9(first);
+        // Reaped: the watcher has the exit, and marks the server right
+        // after, unless its thread is preempted in between.
+        assert!(gone_within(first, Duration::from_secs(5)).await);
         tokio::time::sleep(Duration::from_millis(300)).await;
         let r = lsp(hover_input(&file), &session).await;
         assert!(matches!(r, LspResult::Hover(_)), "{r:?}");
@@ -150,7 +151,7 @@ async fn an_idle_exit_is_replaced_by_the_next_call() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_broken_stdin_reports_server_crashed_and_the_next_call_works() {
-    common::bounded(async {
+    common::bounded_alone(async {
         let fake = Fake::new();
         let client = Arc::new(SpawnLspClient::new());
         let file = fake.file("a.fake", "x\n");
@@ -380,6 +381,7 @@ async fn concurrent_first_calls_share_one_server_and_close_stops_every_process()
             );
         }
     };
+    let _shared = common::shared_spawns().await;
     if tokio::time::timeout(Duration::from_secs(120), run)
         .await
         .is_err()
@@ -412,7 +414,7 @@ async fn dropping_the_client_stops_its_servers() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stdin_that_breaks_during_the_start_fails_the_start() {
-    common::bounded(async {
+    common::bounded_alone(async {
         let fake = Fake::new();
         let client = Arc::new(SpawnLspClient::new());
         let file = fake.file("a.fake", "x\n");

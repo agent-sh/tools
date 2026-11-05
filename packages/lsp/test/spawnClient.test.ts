@@ -740,7 +740,9 @@ describe("spawn client: startup", () => {
       expect(spawnCount(root)).toBe(1);
       // Reported once: the next call starts a new server.
       expect(await lsp(hover, session)).toMatchObject({ kind: "error", error: { code: "TIMEOUT" } });
-      expect(spawnCount(root)).toBe(2);
+      // The new server records its spawn once node has started, which under
+      // load can be after the 300ms call gave up.
+      await expect.poll(() => spawnCount(root), { timeout: 5_000 }).toBe(2);
     } finally {
       await client.closeSession();
     }
