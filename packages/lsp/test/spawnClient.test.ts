@@ -39,7 +39,8 @@ type FakeMode =
   | "close-stdin-on-hover"
   | "close-stdout-on-hover"
   | "slow-initialize"
-  | "slow-die-on-initialize";
+  | "slow-die-on-initialize"
+  | "hold-die-on-initialize";
 
 // A mode that also starts a child: one that ignores SIGTERM, or one that
 // exits on it.
@@ -1081,6 +1082,47 @@ describe("spawn client: a handle names one server instance", () => {
       await expect(call).rejects.toThrow("stopped after this call got its handle");
     } finally {
       vi.restoreAllMocks();
+      await client.closeSession();
+    }
+  });
+
+  it("keeps a deferred start failure's reason for a starting handle", async () => {
+    const client = createSpawnLspClient();
+    const file = write(root, "a.fake", "x\n");
+    const profile = fakeProfile("hold-die-on-initialize", root);
+    try {
+      // The first call starts the server and gives up during the start.
+      const controller = new AbortController();
+      const first = client.ensureServer({ language: "fake", root, profile, signal: controller.signal });
+      // A second call holds a `starting` handle for that server.
+      const starting = await client.ensureServer({ language: "fake", root, profile });
+      expect(starting.state).toBe("starting");
+      controller.abort();
+      await expect(first).rejects.toThrow();
+      // The start fails with no caller left to see it.
+      write(root, "reply-initialize", "");
+      // The next call gets the deferred failure, once the start has failed.
+      const deadline = performance.now() + 10_000;
+      for (;;) {
+        let failure: unknown;
+        try {
+          const h = await client.ensureServer({ language: "fake", root, profile });
+          expect(h.instance).toBe(starting.instance);
+        } catch (e) {
+          failure = e;
+        }
+        if (failure !== undefined) {
+          expect(String(failure)).toContain("exited with code 3");
+          break;
+        }
+        if (performance.now() > deadline) throw new Error("the start never failed");
+        await settle(10);
+      }
+      // The handle still gets that server's own reason.
+      await expect(client.hover(starting, file, POS, new AbortController().signal)).rejects.toThrow(
+        "exited with code 3",
+      );
+    } finally {
       await client.closeSession();
     }
   });

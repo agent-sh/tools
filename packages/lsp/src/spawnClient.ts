@@ -327,6 +327,8 @@ export function createSpawnLspClient(
     if (args.signal?.aborted) throw new Error("aborted");
     if (existing?.unreportedStartError !== undefined) {
       const reason = existing.unreportedStartError;
+      // A `starting` handle for it still gets its reason.
+      keepReplaced(existing);
       servers.delete(k);
       throw reason;
     }

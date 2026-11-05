@@ -34,6 +34,9 @@
 //                              FAKE_INITIALIZE_DELAY_MS when that is set.
 //   hold-initialize            answers `initialize` only once
 //                              STATE_DIR/reply-initialize exists.
+//   hold-die-on-initialize     once STATE_DIR/reply-initialize exists,
+//                              writes to stderr and exits with code 3
+//                              without answering `initialize`.
 //   flood-stderr-on-initialize writes FLOOD_BYTES to stderr, then answers
 //                              `initialize` once the write has drained.
 //   flood-stderr-then-die      writes FLOOD_BYTES and a last line to stderr,
@@ -139,6 +142,15 @@ function handle(message) {
       if (mode === "silent-on-initialize") return;
       if (mode === "slow-die-on-initialize") {
         setTimeout(() => die(3, "fake server: missing config, giving up\n"), 800);
+        return;
+      }
+      if (mode === "hold-die-on-initialize") {
+        const marker = path.join(stateDir, "reply-initialize");
+        const poll = setInterval(() => {
+          if (!existsSync(marker)) return;
+          clearInterval(poll);
+          die(3, "fake server: missing config, giving up\n");
+        }, 10);
         return;
       }
       if (mode === "hold-initialize") {

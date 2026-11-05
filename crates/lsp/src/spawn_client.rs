@@ -1590,6 +1590,8 @@ impl LspClient for SpawnLspClient {
                     // it once; the call after this one starts a new server.
                     if let Some(reason) = st.unreported_start_error.take() {
                         drop(st);
+                        // A `starting` handle for it still gets its reason.
+                        self.retire_instance(Arc::clone(&entry));
                         servers.remove(&key);
                         return Err(reason);
                     }
@@ -2023,6 +2025,16 @@ mod tests {
         true
     }
 
+    /// Waits until `n` gated spawns have begun, at most as long as the gate
+    /// holds one, so a call that never reaches its spawn fails the test.
+    async fn began_within(began: &tokio::sync::Semaphore, n: u32) {
+        tokio::time::timeout(Duration::from_secs(20), began.acquire_many(n))
+            .await
+            .expect("the spawn never began")
+            .unwrap()
+            .forget();
+    }
+
     fn temp_root() -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir
@@ -2094,7 +2106,7 @@ mod tests {
                 client.ensure_server("slow", &root, &profile, rx).await
             })
         };
-        began.acquire().await.unwrap().forget();
+        began_within(&began, 1).await;
         let fast = {
             let client = Arc::clone(&client);
             let profile = fake_profile("well-behaved", &fast_root);
@@ -2209,7 +2221,7 @@ mod tests {
                 client.ensure_server("fake", &root, &profile, rx).await
             })
         };
-        began.acquire().await.unwrap().forget();
+        began_within(&began, 1).await;
         let closing = tokio::time::Instant::now();
         client.close_session().await;
         let took = closing.elapsed();
@@ -2323,7 +2335,7 @@ mod tests {
                 })
             })
             .collect();
-        began.acquire_many(3).await.unwrap().forget();
+        began_within(&began, 3).await;
         let closing = tokio::time::Instant::now();
         client.close_session().await;
         let took = closing.elapsed();
@@ -2619,7 +2631,7 @@ mod tests {
         gate.release(1);
         let client = Arc::new(client);
         let (stale, reason) = crashed_handle(&client, &root).await;
-        began.acquire().await.unwrap().forget();
+        began_within(&began, 1).await;
         let replacement = {
             let client = Arc::clone(&client);
             let root = root.clone();
@@ -2630,7 +2642,7 @@ mod tests {
                     .await
             })
         };
-        began.acquire().await.unwrap().forget();
+        began_within(&began, 1).await;
         assert!(matches!(
             client
                 .servers
@@ -2674,7 +2686,7 @@ mod tests {
                     .await
             })
         };
-        began.acquire().await.unwrap().forget();
+        began_within(&began, 1).await;
         // A second call finds the placeholder and gets a `starting` handle.
         let (_tx, rx) = watch::channel(false);
         let starting = client
@@ -2748,7 +2760,7 @@ mod tests {
                 client.ensure_server("fake", &root, &profile, rx).await
             })
         };
-        began.acquire().await.unwrap().forget();
+        began_within(&began, 1).await;
         let (_tx, rx) = watch::channel(false);
         let starting = client
             .ensure_server("fake", root, &profile, rx)
@@ -2891,7 +2903,7 @@ mod tests {
                     .await
             })
         };
-        began.acquire().await.unwrap().forget();
+        began_within(&began, 1).await;
         cancel.send(true).unwrap();
         gate.release(1);
         assert_eq!(first.await.unwrap().unwrap_err(), LspClientError::Aborted);
@@ -2932,6 +2944,109 @@ mod tests {
         assert!(
             matches!(&r, Err(e) if e.to_string().contains("exited with code 3")),
             "the deferred start failure was lost: {r:?}"
+        );
+        client.close_session().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deferred_start_failure_keeps_its_reason_for_a_starting_handle() {
+        let (_dir, root) = temp_root();
+        let client = Arc::new(SpawnLspClient::new());
+        let profile = fake_profile("hold-die-on-initialize", &root);
+        // The first call starts the server and gives up during the start.
+        let (cancel, rx) = watch::channel(false);
+        let first = {
+            let client = Arc::clone(&client);
+            let root = root.clone();
+            let profile = profile.clone();
+            tokio::spawn(async move { client.ensure_server("fake", &root, &profile, rx).await })
+        };
+        let key = SpawnLspClient::key("fake", &root);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !matches!(
+            client.servers.lock().unwrap().get(&key),
+            Some(Slot::Server(_))
+        ) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the spawn never ended"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // A second call holds a `starting` handle for that server.
+        let (_tx, rx) = watch::channel(false);
+        let starting = client
+            .ensure_server("fake", &root, &profile, rx)
+            .await
+            .unwrap();
+        assert_eq!(starting.state, ServerState::Starting);
+        cancel.send(true).unwrap();
+        assert_eq!(first.await.unwrap().unwrap_err(), LspClientError::Aborted);
+        // The start fails with no caller left to see it.
+        std::fs::write(Path::new(&root).join("reply-initialize"), "").unwrap();
+        let exited = |r: &Result<(), LspClientError>| matches!(r, Err(e) if e.to_string().contains("exited with code 3"));
+        // The next call gets the deferred failure, once the start has failed.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let (_tx, rx) = watch::channel(false);
+            match client.ensure_server("fake", &root, &profile, rx).await {
+                Ok(h) => assert_eq!(h.instance, starting.instance, "a second server started"),
+                Err(e) => {
+                    assert!(e.to_string().contains("exited with code 3"), "{e}");
+                    break;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the start never failed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The handle still gets that server's own reason.
+        let r = hover_with(&client, &starting, &root).await;
+        assert!(
+            exited(&r),
+            "the starting handle lost its server's reason: {r:?}"
+        );
+        client.close_session().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kept_server_drops_its_open_files_and_then_its_entry() {
+        let (_dir, root) = temp_root();
+        let client = SpawnLspClient::new();
+        let (_tx, rx) = watch::channel(false);
+        let handle = client
+            .ensure_server("fake", &root, &fake_profile("well-behaved", &root), rx)
+            .await
+            .unwrap();
+        assert_eq!(hover_with(&client, &handle, &root).await, Ok(()));
+        let entry = server_entry(&client, &root);
+        assert_eq!(entry.opened.lock().unwrap().len(), 1);
+        // Kept while it still runs: no reason yet, so the entry is kept.
+        client.retire_instance(Arc::clone(&entry));
+        assert!(
+            entry.opened.lock().unwrap().is_empty(),
+            "a kept server still holds its open files"
+        );
+        assert!(matches!(
+            client.retired.lock().unwrap()[0].why,
+            Why::Server(_)
+        ));
+        signal(read_pid(&root, "pid"), libc::SIGKILL);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while entry.gone_reason().is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the client never saw the exit"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The next prune keeps the reason and lets the entry go.
+        prune(&mut client.retired.lock().unwrap(), client.retired_keep);
+        assert!(
+            matches!(client.retired.lock().unwrap()[0].why, Why::Reason(_)),
+            "a kept server still holds its entry after its reason is set"
         );
         client.close_session().await;
     }
