@@ -207,7 +207,7 @@ export async function lsp(
       return err(
         toolError(
           "SERVER_NOT_AVAILABLE",
-          `Failed to spawn ${profile.language} server: ${(e as Error).message}`,
+          `Failed to start ${profile.language} server: ${(e as Error).message}`,
         ),
       );
     }

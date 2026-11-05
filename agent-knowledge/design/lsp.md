@@ -235,7 +235,7 @@ Hint is operation-specific:
 | `OUTSIDE_WORKSPACE` | Path outside all configured roots, no hook. |
 | `SENSITIVE` | Path matches sensitive-pattern deny list. |
 | `PERMISSION_DENIED` | Hook returned deny. |
-| `SERVER_NOT_AVAILABLE` | No `.lsp.json` entry for the language; the model can fall back to grep. Hint: `"No language server configured for {language} ({ext}). Configure one in .lsp.json or session config."` |
+| `SERVER_NOT_AVAILABLE` | No `.lsp.json` entry for the language; the model can fall back to grep. Hint: `"No language server configured for {language} ({ext}). Configure one in .lsp.json or session config."` Also when the server could not start: the spawn failed, it exited during `initialize`, or it did not answer `initialize` within the bound. A start that failed after the call that began it gave up is reported once, to the next call (5.3). |
 | `POSITION_INVALID` | `line > file.length` OR `character > line.length`. Hint includes the actual bounds. |
 | `SERVER_CRASHED` | Language server process died, or lost a pipe, while this call was using it. The next call starts a new server. |
 | `TIMEOUT` | Server didn't respond within the per-op timeout (default 30s). Server might be CPU-bound; retry or narrow. |
@@ -318,7 +318,7 @@ The handshake itself is bounded by `DEFAULT_INITIALIZE_TIMEOUT_MS`, the session 
 
 ### 5.5 Crash handling
 
-- If the server exits while no call is using it, the next call's `ensureServer` starts a new one and that call proceeds. `ensureServer` never returns a crashed handle: `ServerHandle.state` is `starting` or `ready`.
+- If a ready server exits while no call is using it, the next call's `ensureServer` starts a new one and that call proceeds. A server that exits while it is still starting in the background is reported first (5.3): the next call gets `SERVER_NOT_AVAILABLE` with the reason, and the call after it starts a new server. Until its start has failed, such a server counts as starting, so a call in between gets `server_starting`, not a second server. `ensureServer` never returns a crashed handle: `ServerHandle.state` is `starting` or `ready`.
 - A call that sees the server die gets `SERVER_CRASHED`, and the call after it starts a new server.
 - A request in flight when the process exits rejects at once with `LspServerExitedError` (exit code or signal, plus the server's last stderr output). It does not wait for the per-op timeout. The tool returns it as `SERVER_CRASHED` for that call.
 - The client always drains the server's stderr, so a server that writes a lot of it never blocks on a full pipe. Only the last 4 KB is kept, for that error.
@@ -375,7 +375,7 @@ LSP servers track `textDocument/didOpen` and `textDocument/didChange` to underst
 
 ## 8. Timeouts
 
-- Default 30s per tool call, starting the server included. The call's signal reaches `ensureServer`. When the start outlasts it, the call returns `TIMEOUT` and the server keeps starting, bounded by the client's `initialize` limit (60s by default, above the call budget), so the next call gets `server_starting` or a result.
+- Default 30s per tool call, starting the server included. The call's signal reaches `ensureServer`. When the start outlasts it, the call returns `TIMEOUT` and the server keeps starting, bounded by the client's `initialize` limit (60s by default, above the call budget), so the next call gets `server_starting` or a result. If the start failed meanwhile, the next call gets `SERVER_NOT_AVAILABLE` with the reason instead (5.3).
 - A call cancelled through the session signal returns `TIMEOUT` with a message that says it was cancelled. A call whose signal is already aborted sends nothing and starts no server.
 - Session backstop 60s.
 - On timeout, SIGTERM the LSP request (if the server supports `$/cancelRequest`), return `TIMEOUT`. The server stays alive; subsequent calls reuse it.

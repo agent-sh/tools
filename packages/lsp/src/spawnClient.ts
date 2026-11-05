@@ -293,8 +293,14 @@ export function createSpawnLspClient(
 
     // Handlers touch only their own entry: a re-spawned server under the
     // same key is a different entry and stays untouched by an old exit.
+    // A server still starting stays "starting" until its start fails: the
+    // start's own handler marks it crashed together with the error to
+    // report, so no call sees it crashed without that error.
+    const markCrashed = (): void => {
+      if (entry.state !== "starting") entry.state = "crashed";
+    };
     const markGone = (reason: unknown): void => {
-      entry.state = "crashed";
+      markCrashed();
       resolveExited();
       gone.fire(reason);
       // Rejects whatever the connection still holds; no write can follow.
@@ -306,7 +312,7 @@ export function createSpawnLspClient(
       else entry.state = "crashed";
     });
     proc.on("exit", (code, signal) => {
-      entry.state = "crashed";
+      markCrashed();
       resolveExited();
       // One more turn lets stderr that is already in the pipe arrive, so
       // the error carries the server's last words.

@@ -746,6 +746,38 @@ describe("spawn client: startup", () => {
     }
   }, HANG_LIMIT_MS);
 
+  it("reports a start that exits in the same turn as the next call", async () => {
+    const client = createSpawnLspClient({ initializeTimeoutMs: 3_000 });
+    const args = { language: "fake", root, profile: fakeProfile("slow-die-on-initialize", root) };
+    try {
+      const cancel = new AbortController();
+      const first = client.ensureServer({ ...args, signal: cancel.signal });
+      cancel.abort();
+      await expect(first).rejects.toThrow("aborted");
+      // Call on every turn of the event loop, so one call lands in the turn
+      // where the exit is seen but the start has not failed yet.
+      let outcome: unknown;
+      const deadline = Date.now() + 5_000;
+      while (outcome === undefined && Date.now() < deadline) {
+        await new Promise((resolve) => setImmediate(resolve));
+        try {
+          const handle = await client.ensureServer(args);
+          if (handle.state !== "starting") outcome = handle;
+        } catch (e) {
+          outcome = e;
+        }
+      }
+      expect(outcome).toMatchObject({
+        name: "LspServerExitedError",
+        exitCode: 3,
+        message: expect.stringContaining("missing config, giving up"),
+      });
+      expect(spawnCount(root)).toBe(1);
+    } finally {
+      await client.closeSession();
+    }
+  }, HANG_LIMIT_MS);
+
   it("reports the exit code and stderr of a start that died after its call gave up", async () => {
     const client = createSpawnLspClient({ initializeTimeoutMs: 3_000 });
     const file = write(root, "a.fake", "x\n");
@@ -762,7 +794,9 @@ describe("spawn client: startup", () => {
         kind: "error",
         error: {
           code: "SERVER_NOT_AVAILABLE",
-          message: expect.stringMatching(/exited with code 3[\s\S]*missing config, giving up/),
+          message: expect.stringMatching(
+            /^Failed to start fake server: Language server for fake exited with code 3[\s\S]*missing config, giving up/,
+          ),
         },
       });
       expect(spawnCount(root)).toBe(1);
