@@ -999,6 +999,16 @@ fn map_symbol_information(v: &Value) -> LspSymbolInfo {
     }
 }
 
+/// Where the server a handle names stands under its key.
+enum Lookup {
+    /// It is the server under the key.
+    Server(Arc<ServerEntry>),
+    /// Its spawn is still running outside the lock.
+    Spawning,
+    /// Another server, or nothing, is under the key now.
+    Gone,
+}
+
 /// A server that a new one replaced under its key, and when.
 struct Retired {
     at: tokio::time::Instant,
@@ -1286,14 +1296,16 @@ impl SpawnLspClient {
         rx
     }
 
-    /// The server the handle names, while it is still the one under its key.
-    fn entry_for(&self, handle: &ServerHandle) -> Option<Arc<ServerEntry>> {
+    /// Where the server the handle names stands under its key.
+    fn entry_for(&self, handle: &ServerHandle) -> Lookup {
         let key = Self::key(&handle.language, &handle.root);
         match self.servers.lock().unwrap().get(&key) {
             Some(Slot::Server(entry)) if entry.instance == handle.instance => {
-                Some(Arc::clone(entry))
+                Lookup::Server(Arc::clone(entry))
             }
-            _ => None,
+            // A concurrent call got a `starting` handle for this spawn.
+            Some(Slot::Spawning(claim, _)) if *claim == handle.instance => Lookup::Spawning,
+            _ => Lookup::Gone,
         }
     }
 
@@ -1353,8 +1365,19 @@ impl SpawnLspClient {
     /// caller got its handle reports that, also once another server has
     /// replaced it under the same key.
     async fn ready_entry(&self, handle: &ServerHandle) -> Result<Arc<ServerEntry>, LspClientError> {
-        let Some(entry) = self.entry_for(handle) else {
-            return Err(self.replaced(handle).await);
+        let not_ready = |state: EntryState| {
+            LspClientError::Other(format!(
+                "Server for {} at {} is not ready (state={})",
+                handle.language,
+                handle.root,
+                state.as_str()
+            ))
+        };
+        let entry = match self.entry_for(handle) {
+            Lookup::Server(entry) => entry,
+            // Still spawning: as starting as the entry it becomes.
+            Lookup::Spawning => return Err(not_ready(EntryState::Starting)),
+            Lookup::Gone => return Err(self.replaced(handle).await),
         };
         if let Some(reason) = entry.gone_reason() {
             return Err(reason);
@@ -1364,12 +1387,7 @@ impl SpawnLspClient {
             return Err(entry.wait_gone().await);
         }
         if state != EntryState::Ready {
-            return Err(LspClientError::Other(format!(
-                "Server for {} at {} is not ready (state={})",
-                handle.language,
-                handle.root,
-                state.as_str()
-            )));
+            return Err(not_ready(state));
         }
         Ok(entry)
     }
@@ -2516,6 +2534,71 @@ mod tests {
             "a call during the replacement's spawn got another error"
         );
         assert!(replacement.await.unwrap().is_ok());
+        client.close_session().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_starting_handle_for_a_spawn_in_flight_is_not_ready_rather_than_crashed() {
+        let (_dir, root) = temp_root();
+        let began = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut client = SpawnLspClient::new();
+        // The spawn blocks its thread for 1s; then the server answers
+        // initialize 800ms after it reads it.
+        client.slow_spawn = Some((
+            "fake".to_string(),
+            Duration::from_secs(1),
+            Arc::clone(&began),
+        ));
+        let client = Arc::new(client);
+        let first = {
+            let client = Arc::clone(&client);
+            let root = root.clone();
+            tokio::spawn(async move {
+                let (_tx, rx) = watch::channel(false);
+                client
+                    .ensure_server("fake", &root, &fake_profile("slow-initialize", &root), rx)
+                    .await
+            })
+        };
+        began.acquire().await.unwrap().forget();
+        // A second call finds the placeholder and gets a `starting` handle.
+        let (_tx, rx) = watch::channel(false);
+        let starting = client
+            .ensure_server("fake", &root, &fake_profile("slow-initialize", &root), rx)
+            .await
+            .unwrap();
+        assert_eq!(starting.state, ServerState::Starting);
+        let key = SpawnLspClient::key("fake", &root);
+        assert!(matches!(
+            client.servers.lock().unwrap().get(&key),
+            Some(Slot::Spawning(claim, _)) if *claim == starting.instance
+        ));
+        let not_ready = Err(LspClientError::Other(format!(
+            "Server for fake at {root} is not ready (state=starting)"
+        )));
+        assert_eq!(
+            hover_with(&client, &starting, &root).await,
+            not_ready,
+            "during the spawn"
+        );
+        // The spawn is done and the server is starting: the same answer.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !matches!(
+            client.servers.lock().unwrap().get(&key),
+            Some(Slot::Server(e)) if e.instance == starting.instance
+        ) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the spawn never ended"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            hover_with(&client, &starting, &root).await,
+            not_ready,
+            "after the spawn"
+        );
+        assert_eq!(first.await.unwrap().unwrap().state, ServerState::Ready);
         client.close_session().await;
     }
 
