@@ -30,8 +30,9 @@ pub use schema::{
 pub use spawn_client::{SpawnLspClient, SpawnLspClientOptions};
 pub use stub_client::{StubBehavior, StubLspClient, StubResponses};
 pub use types::{
-    CancelSignal, LspClient, LspClientError, LspDefinitionOk, LspDocumentSymbolOk, LspError, LspHoverOk, LspHoverResult,
-    LspImplementationOk, LspLocation, LspManifest, LspNoResults, LspOperation,
-    LspPermissionPolicy, LspReferencesOk, LspResult, LspServerProfile, LspServerStarting,
-    LspSessionConfig, LspSymbolInfo, LspWorkspaceSymbolOk, Position1, ServerHandle, ServerState,
+    CancelSignal, LspClient, LspClientError, LspDefinitionOk, LspDocumentSymbolOk, LspError,
+    LspHoverOk, LspHoverResult, LspImplementationOk, LspLocation, LspManifest, LspNoResults,
+    LspOperation, LspPermissionPolicy, LspReferencesOk, LspResult, LspServerProfile,
+    LspServerStarting, LspSessionConfig, LspSymbolInfo, LspWorkspaceSymbolOk, Position1,
+    ServerHandle, ServerState,
 };

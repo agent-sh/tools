@@ -26,6 +26,8 @@
 //   die-on-initialize          writes to stderr and exits with code 3
 //                              instead of answering `initialize`.
 //   silent-on-initialize       never answers `initialize`.
+//   exit-after-initialized     answers `initialize`, then exits with code 0
+//                              100ms after `initialized`.
 //   slow-die-on-initialize     writes to stderr and exits with code 3 800ms
 //                              after `initialize`, without answering it.
 //   slow-initialize            answers `initialize` after 800ms, or after
@@ -128,6 +130,9 @@ function handle(message) {
       }
       send({ id: message.id, result: { capabilities: { hoverProvider: true } } });
       if (mode === "stop-reading-after-initialize") process.stdin.pause();
+      return;
+    case "initialized":
+      if (mode === "exit-after-initialized") setTimeout(() => process.exit(0), 100);
       return;
     case "textDocument/didOpen":
       appendFileSync(path.join(stateDir, "didopen"), `${message.params.textDocument.uri}\n`);

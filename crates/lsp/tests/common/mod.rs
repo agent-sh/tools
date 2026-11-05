@@ -121,6 +121,19 @@ impl Fake {
             .unwrap_or(0)
     }
 
+    /// Pids of every server started in this dir, in start order.
+    pub fn spawned_pids(&self) -> Vec<i32> {
+        fs::read_to_string(Path::new(&self.root).join("spawns"))
+            .map(|s| s.lines().filter_map(|l| l.trim().parse().ok()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn did_opens(&self) -> usize {
+        fs::read_to_string(Path::new(&self.root).join("didopen"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
     pub fn exists(&self, name: &str) -> bool {
         Path::new(&self.root).join(name).exists()
     }
@@ -140,6 +153,18 @@ pub fn code_and_message(r: &LspResult) -> Option<(ToolErrorCode, String)> {
 /// True while the process exists, a zombie not yet reaped included.
 pub fn alive(pid: i32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Wait until the process is gone, up to `limit`. True when it is gone.
+pub async fn gone_within(pid: i32, limit: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + limit;
+    while alive(pid) {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    true
 }
 
 pub fn kill9(pid: i32) {

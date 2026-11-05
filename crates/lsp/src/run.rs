@@ -117,18 +117,21 @@ pub async fn lsp(input: Value, session: &LspSessionConfig) -> LspResult {
                 ext
             )
         } else {
-            "workspaceSymbol needs at least one server in .lsp.json to pick a primary language.".to_string()
+            "workspaceSymbol needs at least one server in .lsp.json to pick a primary language."
+                .to_string()
         };
-        return err(ToolError::new(ToolErrorCode::ServerNotAvailable, hint).with_meta(
-            serde_json::json!({
+        return err(
+            ToolError::new(ToolErrorCode::ServerNotAvailable, hint).with_meta(serde_json::json!({
                 "extension": ext,
                 "path": resolved_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            }),
-        ));
+            })),
+        );
     };
 
     // Permission hook
-    let path_str_opt = resolved_path.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let path_str_opt = resolved_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
     let ask = AskArgs {
         operation: params.operation,
         path: path_str_opt.as_deref(),
@@ -140,11 +143,14 @@ pub async fn lsp(input: Value, session: &LspSessionConfig) -> LspResult {
     match ask_permission(session, ask).await {
         PermissionOutcome::Allow => {}
         PermissionOutcome::Deny { reason } => {
-            return err(ToolError::new(ToolErrorCode::PermissionDenied, reason)
-                .with_meta(serde_json::json!({
-                    "operation": params.operation.as_str(),
-                    "path": path_str_opt,
-                })));
+            return err(
+                ToolError::new(ToolErrorCode::PermissionDenied, reason).with_meta(
+                    serde_json::json!({
+                        "operation": params.operation.as_str(),
+                        "path": path_str_opt,
+                    }),
+                ),
+            );
         }
     }
 
@@ -257,18 +263,11 @@ pub async fn lsp(input: Value, session: &LspSessionConfig) -> LspResult {
             }
             LspOperation::WorkspaceSymbol => {
                 let query = params.query.as_deref().unwrap();
-                let head_limit = params.head_limit.unwrap_or(
-                    session.default_head_limit.unwrap_or(DEFAULT_HEAD_LIMIT),
-                );
-                run_workspace_symbol(
-                    session,
-                    handle,
-                    query,
-                    head_limit,
-                    cancel_rx.clone(),
-                    &ctx,
-                )
-                .await
+                let head_limit = params
+                    .head_limit
+                    .unwrap_or(session.default_head_limit.unwrap_or(DEFAULT_HEAD_LIMIT));
+                run_workspace_symbol(session, handle, query, head_limit, cancel_rx.clone(), &ctx)
+                    .await
             }
         })
     };
@@ -407,8 +406,18 @@ async fn run_locations_op(
 ) -> LspResult {
     let path_str = path.to_string_lossy();
     let raw_res = match op {
-        LspOperation::Definition => session.client.definition(handle, &path_str, pos, cancel).await,
-        LspOperation::References => session.client.references(handle, &path_str, pos, cancel).await,
+        LspOperation::Definition => {
+            session
+                .client
+                .definition(handle, &path_str, pos, cancel)
+                .await
+        }
+        LspOperation::References => {
+            session
+                .client
+                .references(handle, &path_str, pos, cancel)
+                .await
+        }
         LspOperation::Implementation => {
             session
                 .client
@@ -536,11 +545,7 @@ async fn run_workspace_symbol(
     cancel: crate::types::CancelSignal,
     ctx: &CallCtx<'_>,
 ) -> LspResult {
-    let symbols = match session
-        .client
-        .workspace_symbol(handle, query, cancel)
-        .await
-    {
+    let symbols = match session.client.workspace_symbol(handle, query, cancel).await {
         Ok(v) => v,
         Err(e) => return translate_client_error(e, ctx),
     };
@@ -611,9 +616,7 @@ fn translate_client_error(e: LspClientError, ctx: &CallCtx<'_>) -> LspResult {
         LspClientError::Other(msg) => msg,
     };
     let lower = msg.to_lowercase();
-    if lower.contains("position")
-        && (lower.contains("invalid") || lower.contains("out of range"))
-    {
+    if lower.contains("position") && (lower.contains("invalid") || lower.contains("out of range")) {
         return err(ToolError::new(ToolErrorCode::PositionInvalid, msg));
     }
     err(ToolError::new(

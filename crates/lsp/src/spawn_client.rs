@@ -366,6 +366,9 @@ impl ServerEntry {
     /// Start stopping the server in the background, once. `close_session`
     /// waits for every stop that was begun.
     fn begin_stop(self: &Arc<Self>) {
+        // Mark and register under the stops lock, so close_session either
+        // sees this stop or runs before it begins.
+        let mut stops = self.stops.lock().unwrap();
         {
             let mut st = self.status.lock().unwrap();
             if st.stopping {
@@ -373,9 +376,9 @@ impl ServerEntry {
             }
             st.stopping = true;
         }
+        stops.retain(|h| !h.is_finished());
         let me = Arc::clone(self);
-        let handle = tokio::spawn(async move { me.stop().await });
-        self.stops.lock().unwrap().push(handle);
+        stops.push(tokio::spawn(async move { me.stop().await }));
     }
 
     /// Stop the server in bounded steps (design spec section 5.4).
@@ -695,12 +698,16 @@ fn file_uri(p: &str) -> String {
         .unwrap_or_else(|_| format!("file://{}", p))
 }
 
+/// The path of a `file://` URI, percent-decoded, as the TypeScript client
+/// reads it. Anything else comes back unchanged.
 fn file_uri_to_path(uri: &str) -> String {
-    if let Some(rest) = uri.strip_prefix("file://") {
-        // Drop leading '/' iff Windows-style; otherwise keep as-is.
-        return rest.to_string();
+    if !uri.starts_with("file://") {
+        return uri.to_string();
     }
-    uri.to_string()
+    match Url::parse(uri).ok().and_then(|u| u.to_file_path().ok()) {
+        Some(p) => p.to_string_lossy().into_owned(),
+        None => uri["file://".len()..].to_string(),
+    }
 }
 
 fn lsp_pos(p: Position1) -> Value {
@@ -853,6 +860,9 @@ pub struct SpawnLspClient {
     servers: StdMutex<HashMap<String, Arc<ServerEntry>>>,
     stops: Arc<StdMutex<Vec<JoinHandle<()>>>>,
     initialize_timeout: Duration,
+    /// Test hook: a pause between the handshake and the readiness check.
+    #[cfg(test)]
+    after_handshake: Option<Duration>,
 }
 
 impl SpawnLspClient {
@@ -869,6 +879,8 @@ impl SpawnLspClient {
                     .initialize_timeout_ms
                     .unwrap_or(DEFAULT_INITIALIZE_TIMEOUT_MS),
             ),
+            #[cfg(test)]
+            after_handshake: None,
         }
     }
 
@@ -979,6 +991,8 @@ impl SpawnLspClient {
             "initializationOptions": profile.initialization_options.clone().unwrap_or(Value::Null),
         });
         let limit = self.initialize_timeout;
+        #[cfg(test)]
+        let after_handshake = self.after_handshake;
         let (tx, rx) = watch::channel(None);
         tokio::spawn(async move {
             let init =
@@ -990,24 +1004,42 @@ impl SpawnLspClient {
                     limit.as_millis()
                 ))),
                 Ok(Err(e)) => Err(e),
-                Ok(Ok(_)) => match entry
+                Ok(Ok(_)) => entry
                     .notify("initialized", serde_json::json!({}), None)
-                    .await
-                {
-                    Err(e) => Err(e),
-                    // A server that exited right after the handshake is
-                    // not ready either.
-                    Ok(()) if !entry.running() => Err(entry.wait_gone().await),
-                    Ok(()) => Ok(()),
-                },
+                    .await,
             };
-            match &result {
+            #[cfg(test)]
+            if result.is_ok() {
+                if let Some(pause) = after_handshake {
+                    tokio::time::sleep(pause).await;
+                }
+            }
+            // Decide under the status lock, with the liveness check. The
+            // watcher marks `exited` before it takes this lock, so either
+            // it sees `Ready` and marks the server crashed, or this sees
+            // the exit: a dead server never stays ready.
+            let result = match result {
                 Ok(()) => {
-                    let mut st = entry.status.lock().unwrap();
-                    if st.state == EntryState::Starting {
-                        st.state = EntryState::Ready;
+                    let ready = {
+                        let mut st = entry.status.lock().unwrap();
+                        let ready = st.state == EntryState::Starting && entry.running();
+                        if ready {
+                            st.state = EntryState::Ready;
+                        }
+                        ready
+                    };
+                    if ready {
+                        Ok(())
+                    } else {
+                        // A server that exited right after the handshake is
+                        // not ready either.
+                        Err(entry.wait_gone().await)
                     }
                 }
+                Err(e) => Err(e),
+            };
+            match &result {
+                Ok(()) => {}
                 Err(e) => {
                     {
                         let mut st = entry.status.lock().unwrap();
@@ -1096,6 +1128,21 @@ impl Default for SpawnLspClient {
     }
 }
 
+/// A client dropped without `close_session` still leaves no process
+/// behind: each server gets SIGKILL. Its watcher then reaps it and the
+/// background tasks end, which frees the entry.
+impl Drop for SpawnLspClient {
+    fn drop(&mut self) {
+        let servers = match self.servers.get_mut() {
+            Ok(servers) => servers,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for (_, entry) in servers.drain() {
+            let _ = entry.kill.send(KillSignal::Kill);
+        }
+    }
+}
+
 #[async_trait]
 impl LspClient for SpawnLspClient {
     async fn ensure_server(
@@ -1106,7 +1153,10 @@ impl LspClient for SpawnLspClient {
         cancel: CancelSignal,
     ) -> Result<ServerHandle, LspClientError> {
         let key = Self::key(language, root);
-        {
+        // Lookup, spawn and insert are one critical section, so concurrent
+        // first calls share one server and no process is left out of the
+        // map. Spawning and starting do not await.
+        let (entry, mut started) = {
             let mut servers = self.servers.lock().unwrap();
             if let Some(entry) = servers.get(&key).cloned() {
                 let mut st = entry.status.lock().unwrap();
@@ -1125,14 +1175,14 @@ impl LspClient for SpawnLspClient {
                     return Err(reason);
                 }
             }
-        }
-        if *cancel.borrow() {
-            return Err(LspClientError::Aborted);
-        }
-
-        let entry = self.spawn_server(language, root, profile)?;
-        self.servers.lock().unwrap().insert(key, Arc::clone(&entry));
-        let mut started = self.start(Arc::clone(&entry), profile);
+            if *cancel.borrow() {
+                return Err(LspClientError::Aborted);
+            }
+            let entry = self.spawn_server(language, root, profile)?;
+            servers.insert(key, Arc::clone(&entry));
+            let started = self.start(Arc::clone(&entry), profile);
+            (entry, started)
+        };
         // An abort releases the caller only. The handshake goes on, bounded
         // by the initialize limit, and the next call finds the server
         // starting or ready, or is told why the start failed.
@@ -1292,6 +1342,93 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../packages/lsp/test/fixtures/fake-lsp-server.mjs"
     );
+
+    fn fake_profile(mode: &str, root: &str) -> LspServerProfile {
+        LspServerProfile {
+            language: "fake".to_string(),
+            extensions: vec![".fake".to_string()],
+            command: vec![
+                "node".to_string(),
+                FAKE_SERVER.to_string(),
+                mode.to_string(),
+                root.to_string(),
+            ],
+            root_patterns: None,
+            initialization_options: None,
+        }
+    }
+
+    fn spawns(root: &str) -> usize {
+        std::fs::read_to_string(Path::new(root).join("spawns"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_that_exits_right_after_the_handshake_is_not_kept_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        // The server exits 100ms after `initialized`; the hook holds the
+        // start for 300ms between the handshake and the readiness check.
+        let profile = fake_profile("exit-after-initialized", &root);
+        let mut client = SpawnLspClient::new();
+        client.after_handshake = Some(Duration::from_millis(300));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let first = client
+            .ensure_server("fake", &root, &profile, cancel_rx.clone())
+            .await;
+        let e = first.expect_err("a server that exited must not be ready");
+        assert!(e.to_string().contains("exited with code 0"), "{e}");
+        // The next call starts a new server instead of reusing a dead one.
+        let _ = client
+            .ensure_server("fake", &root, &profile, cancel_rx)
+            .await;
+        assert_eq!(spawns(&root), 2);
+        client.close_session().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finished_stops_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let profile = fake_profile("silent-on-initialize", &root);
+        let client = SpawnLspClient::with_options(SpawnLspClientOptions {
+            initialize_timeout_ms: Some(100),
+        });
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        for _ in 0..4 {
+            // Each start misses the limit and its server is stopped.
+            let _ = client
+                .ensure_server("fake", &root, &profile, cancel_rx.clone())
+                .await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert!(client.stops.lock().unwrap().len() <= 1);
+        client.close_session().await;
+    }
+
+    #[test]
+    fn file_uris_are_percent_decoded() {
+        assert_eq!(
+            file_uri_to_path("file:///tmp/a%20b/c%23d.ts"),
+            "/tmp/a b/c#d.ts"
+        );
+        assert_eq!(file_uri_to_path("file:///tmp/plain.ts"), "/tmp/plain.ts");
+        assert_eq!(
+            file_uri_to_path("untitled:Untitled-1"),
+            "untitled:Untitled-1"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_exit_write_is_bounded_when_a_queued_write_fills_the_pipe() {

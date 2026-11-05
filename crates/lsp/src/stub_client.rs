@@ -7,9 +7,7 @@ use crate::types::{
     LspSymbolInfo, Position1, ServerHandle, ServerState,
 };
 
-pub type HoverResponder = Arc<
-    dyn Fn(&str, Position1) -> Option<LspHoverResult> + Send + Sync,
->;
+pub type HoverResponder = Arc<dyn Fn(&str, Position1) -> Option<LspHoverResult> + Send + Sync>;
 pub type LocationResponder = Arc<dyn Fn(&str, Position1) -> Vec<LspLocation> + Send + Sync>;
 pub type DocSymbolResponder = Arc<dyn Fn(&str) -> Vec<LspSymbolInfo> + Send + Sync>;
 pub type WorkspaceSymbolResponder = Arc<dyn Fn(&str) -> Vec<LspSymbolInfo> + Send + Sync>;

@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::{alive, code_and_message, hover_input, Fake};
+use common::{alive, code_and_message, gone_within, hover_input, Fake};
 use harness_core::ToolErrorCode;
 use harness_lsp::{lsp, LspClient, LspResult, SpawnLspClient};
 use std::sync::Arc;
@@ -326,6 +326,164 @@ async fn a_file_open_the_server_does_not_read_is_bounded_by_the_call() {
         let pid = fake.pid();
         client.close_session().await;
         assert!(!alive(pid));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_first_calls_share_one_server_and_close_stops_every_process() {
+    let rounds: usize = std::env::var("LSP_STRESS_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let tasks: usize = std::env::var("LSP_STRESS_TASKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    let run = async {
+        for round in 0..rounds {
+            let fake = Fake::new();
+            let client = Arc::new(SpawnLspClient::new());
+            let file = fake.file("a.fake", "x\n");
+            let session = Arc::new(fake.session(client.clone(), "well-behaved", Some(10_000)));
+            let barrier = Arc::new(tokio::sync::Barrier::new(tasks));
+            let calls: Vec<_> = (0..tasks)
+                .map(|_| {
+                    let (session, barrier, file) = (session.clone(), barrier.clone(), file.clone());
+                    tokio::spawn(async move {
+                        barrier.wait().await;
+                        lsp(hover_input(&file), &session).await
+                    })
+                })
+                .collect();
+            for call in calls {
+                let r = call.await.unwrap();
+                assert!(
+                    matches!(r, LspResult::Hover(_) | LspResult::ServerStarting(_)),
+                    "round {round}: {r:?}"
+                );
+            }
+            client.close_session().await;
+            // Give any extra server time to start and record its pid.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let pids = fake.spawned_pids();
+            let running: Vec<i32> = pids.iter().copied().filter(|p| alive(*p)).collect();
+            assert_eq!(
+                pids.len(),
+                1,
+                "round {round}: {} servers for one key",
+                pids.len()
+            );
+            assert!(
+                running.is_empty(),
+                "round {round}: still running after close: {running:?}"
+            );
+        }
+    };
+    if tokio::time::timeout(Duration::from_secs(120), run)
+        .await
+        .is_err()
+    {
+        panic!("the stress run did not finish");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_the_client_stops_its_servers() {
+    common::bounded(async {
+        let fake = Fake::new();
+        let client = Arc::new(SpawnLspClient::new());
+        let file = fake.file("a.fake", "x\n");
+        let session = fake.session(client.clone(), "well-behaved", Some(5_000));
+        assert!(matches!(
+            lsp(hover_input(&file), &session).await,
+            LspResult::Hover(_)
+        ));
+        let pid = fake.pid();
+        drop(session);
+        drop(client);
+        assert!(
+            gone_within(pid, Duration::from_millis(1_500)).await,
+            "the server outlived its client"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stdin_that_breaks_during_the_start_fails_the_start() {
+    common::bounded(async {
+        let fake = Fake::new();
+        let client = Arc::new(SpawnLspClient::new());
+        let file = fake.file("a.fake", "x\n");
+        // The server closes its stdin, then answers initialize.
+        let session = fake.session(client.clone(), "close-stdin-on-initialize", Some(5_000));
+        let r = lsp(hover_input(&file), &session).await;
+        let (code, msg) = code_and_message(&r).expect("an error");
+        assert_eq!(code, ToolErrorCode::ServerNotAvailable, "{msg}");
+        assert!(msg.contains("stopped reading its input"), "{msg}");
+        let pid = fake.pid();
+        client.close_session().await;
+        assert!(!alive(pid));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_error_reply_to_initialize_fails_the_start_and_a_late_exit_leaves_the_new_server_alone()
+{
+    common::bounded(async {
+        let fake = Fake::new();
+        let client = Arc::new(SpawnLspClient::new());
+        let file = fake.file("a.fake", "x\n");
+        // Answers initialize with an error and exits 400ms after SIGTERM.
+        let rejecting = fake.session(client.clone(), "reject-initialize-slow-exit", Some(5_000));
+        let r = lsp(hover_input(&file), &rejecting).await;
+        let (code, msg) = code_and_message(&r).expect("an error");
+        assert_eq!(code, ToolErrorCode::ServerNotAvailable, "{msg}");
+        assert!(msg.contains("fake server: refuses to start"), "{msg}");
+        let old = fake.pid();
+        let session = fake.session(client.clone(), "well-behaved", Some(5_000));
+        assert!(matches!(
+            lsp(hover_input(&file), &session).await,
+            LspResult::Hover(_)
+        ));
+        let new = fake.pid();
+        assert!(
+            gone_within(old, Duration::from_secs(3)).await,
+            "the old server did not exit"
+        );
+        assert!(matches!(
+            lsp(hover_input(&file), &session).await,
+            LspResult::Hover(_)
+        ));
+        assert_eq!(fake.pid(), new, "the late exit replaced the new server");
+        assert_eq!(fake.spawned_pids().len(), 2);
+        client.close_session().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_operations_on_one_file_send_one_did_open() {
+    common::bounded(async {
+        let fake = Fake::new();
+        let client = Arc::new(SpawnLspClient::new());
+        let file = fake.file("a.fake", "x\n");
+        let session = fake.session(client.clone(), "well-behaved", Some(5_000));
+        assert!(matches!(
+            lsp(hover_input(&fake.file("b.fake", "y\n")), &session).await,
+            LspResult::Hover(_)
+        ));
+        let (a, b) = tokio::join!(
+            lsp(hover_input(&file), &session),
+            lsp(hover_input(&file), &session)
+        );
+        assert!(matches!(a, LspResult::Hover(_)), "{a:?}");
+        assert!(matches!(b, LspResult::Hover(_)), "{b:?}");
+        // One for b.fake, one for a.fake.
+        assert_eq!(fake.did_opens(), 2);
+        client.close_session().await;
     })
     .await;
 }
