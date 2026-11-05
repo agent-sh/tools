@@ -1366,12 +1366,14 @@ impl SpawnLspClient {
             match &result {
                 Ok(()) => {}
                 Err(e) => {
-                    {
-                        let mut st = entry.status.lock().unwrap();
-                        st.state = EntryState::Crashed;
-                        st.unreported_start_error = Some(e.clone());
-                    }
+                    // Stop it first, so a call that takes the failure below
+                    // finds the stop begun, and a close waits for it.
+                    // `retire` leaves a starting server starting, so no call
+                    // sees it crashed without its error.
                     entry.retire(None);
+                    let mut st = entry.status.lock().unwrap();
+                    st.state = EntryState::Crashed;
+                    st.unreported_start_error = Some(e.clone());
                 }
             }
             let _ = tx.send(Some(result));
@@ -1590,8 +1592,9 @@ impl LspClient for SpawnLspClient {
                     // it once; the call after this one starts a new server.
                     if let Some(reason) = st.unreported_start_error.take() {
                         drop(st);
-                        // A `starting` handle for it still gets its reason.
-                        self.retire_instance(Arc::clone(&entry));
+                        // A `starting` handle for it gets the reason this
+                        // call gets, not the exit of the stop that followed.
+                        self.keep_reason(entry.instance, reason.clone());
                         servers.remove(&key);
                         return Err(reason);
                     }
@@ -3002,11 +3005,85 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        // That call took the deferred failure: no second server started.
+        assert_eq!(
+            client.spawned.lock().unwrap().len(),
+            1,
+            "a second server started"
+        );
         // The handle still gets that server's own reason.
         let r = hover_with(&client, &starting, &root).await;
         assert!(
             exited(&r),
             "the starting handle lost its server's reason: {r:?}"
+        );
+        client.close_session().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_starting_handle_gets_the_start_s_own_error_after_the_take() {
+        let (_dir, root) = temp_root();
+        let began = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = Arc::new(Gate::default());
+        let mut client = SpawnLspClient::with_options(SpawnLspClientOptions {
+            initialize_timeout_ms: Some(300),
+        });
+        client.slow_spawn = Some((
+            "fake".to_string(),
+            Hold::Until(Arc::clone(&gate)),
+            Arc::clone(&began),
+        ));
+        let client = Arc::new(client);
+        // Never answers initialize: the client's own stop ends it at the
+        // bound, so its exit (SIGTERM) differs from the start's error.
+        let profile = fake_profile("silent-on-initialize", &root);
+        let (cancel, rx) = watch::channel(false);
+        let first = {
+            let client = Arc::clone(&client);
+            let root = root.clone();
+            let profile = profile.clone();
+            tokio::spawn(async move { client.ensure_server("fake", &root, &profile, rx).await })
+        };
+        began_within(&began, 1).await;
+        // A second call holds a `starting` handle for that spawn.
+        let (_tx, rx) = watch::channel(false);
+        let starting = client
+            .ensure_server("fake", &root, &profile, rx)
+            .await
+            .unwrap();
+        assert_eq!(starting.state, ServerState::Starting);
+        // The first call gives up; the start goes on and misses its bound.
+        cancel.send(true).unwrap();
+        gate.release(1);
+        assert_eq!(first.await.unwrap().unwrap_err(), LspClientError::Aborted);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let taken = loop {
+            let (_tx, rx) = watch::channel(false);
+            match client.ensure_server("fake", &root, &profile, rx).await {
+                Ok(h) => assert_eq!(h.instance, starting.instance, "a second server started"),
+                Err(e) => break e,
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the start never failed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(
+            taken
+                .to_string()
+                .contains("did not answer initialize within 300ms"),
+            "{taken}"
+        );
+        assert_eq!(
+            client.spawned.lock().unwrap().len(),
+            1,
+            "a second server started"
+        );
+        assert_eq!(
+            hover_with(&client, &starting, &root).await,
+            Err(taken),
+            "the starting handle got another reason than the call that took the failure"
         );
         client.close_session().await;
     }

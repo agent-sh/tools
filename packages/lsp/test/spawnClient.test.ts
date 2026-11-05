@@ -1086,6 +1086,93 @@ describe("spawn client: a handle names one server instance", () => {
     }
   });
 
+  /**
+   * Calls ensureServer until it throws, the deferred start failure, and
+   * returns that. Until the start has failed it returns the same server.
+   */
+  async function deferredFailure(
+    client: LspClient,
+    profile: LspServerProfile,
+    starting: ServerHandle,
+  ): Promise<unknown> {
+    const deadline = performance.now() + 10_000;
+    for (;;) {
+      let handle: ServerHandle | undefined;
+      try {
+        handle = await client.ensureServer({ language: "fake", root, profile });
+      } catch (e) {
+        return e;
+      }
+      expect(handle.instance).toBe(starting.instance);
+      if (performance.now() > deadline) throw new Error("the start never failed");
+      await settle(10);
+    }
+  }
+
+  it("gives a starting handle the start's own error once the next call took it", async () => {
+    // The client's own stop ends this server at the bound, so its exit
+    // (SIGTERM) differs from the start's error.
+    const client = createSpawnLspClient({ initializeTimeoutMs: 300 });
+    const file = write(root, "a.fake", "x\n");
+    const profile = fakeProfile("silent-on-initialize", root);
+    try {
+      const controller = new AbortController();
+      const first = client.ensureServer({ language: "fake", root, profile, signal: controller.signal });
+      const starting = await client.ensureServer({ language: "fake", root, profile });
+      expect(starting.state).toBe("starting");
+      controller.abort();
+      await expect(first).rejects.toThrow();
+      const taken = await deferredFailure(client, profile, starting);
+      expect(String(taken)).toContain("did not answer initialize within 300ms");
+      expect(spawnCount(root)).toBe(1);
+      await expect(client.hover(starting, file, POS, new AbortController().signal)).rejects.toBe(taken);
+    } finally {
+      await client.closeSession();
+    }
+  });
+
+  it("keeps a crashed server once when its replacement cannot start", async () => {
+    const client = createSpawnLspClient();
+    const otherRoot = makeTempDir("lsp-spawn-other-");
+    const otherFile = write(otherRoot, "a.fake", "x\n");
+    const saved = replacedKeep.count;
+    replacedKeep.count = 2;
+    try {
+      // A server on another root, crashed and replaced: its record.
+      const other = await client.ensureServer({
+        language: "fake",
+        root: otherRoot,
+        profile: fakeProfile("well-behaved", otherRoot),
+      });
+      const otherPid = serverPid(otherRoot);
+      process.kill(otherPid, "SIGKILL");
+      expect(await goneWithin(otherPid, 5_000)).toBe(true);
+      await settle();
+      await client.ensureServer({
+        language: "fake",
+        root: otherRoot,
+        profile: fakeProfile("well-behaved", otherRoot),
+      });
+      // A crashed server whose replacement fails before it spawns, again
+      // and again: it must not be kept once per attempt.
+      await crashedHandle(client);
+      const empty: LspServerProfile = { ...fakeProfile("well-behaved", root), command: [] };
+      for (let i = 0; i < 3; i++) {
+        await expect(client.ensureServer({ language: "fake", root, profile: empty })).rejects.toThrow(
+          "has empty command",
+        );
+      }
+      // The other server's record is still within the bound of 2.
+      await expect(client.hover(other, otherFile, POS, new AbortController().signal)).rejects.toThrow(
+        "was killed by SIGKILL",
+      );
+    } finally {
+      replacedKeep.count = saved;
+      await client.closeSession();
+      rmSync(otherRoot, { recursive: true, force: true });
+    }
+  });
+
   it("keeps a deferred start failure's reason for a starting handle", async () => {
     const client = createSpawnLspClient();
     const file = write(root, "a.fake", "x\n");
@@ -1102,22 +1189,10 @@ describe("spawn client: a handle names one server instance", () => {
       // The start fails with no caller left to see it.
       write(root, "reply-initialize", "");
       // The next call gets the deferred failure, once the start has failed.
-      const deadline = performance.now() + 10_000;
-      for (;;) {
-        let failure: unknown;
-        try {
-          const h = await client.ensureServer({ language: "fake", root, profile });
-          expect(h.instance).toBe(starting.instance);
-        } catch (e) {
-          failure = e;
-        }
-        if (failure !== undefined) {
-          expect(String(failure)).toContain("exited with code 3");
-          break;
-        }
-        if (performance.now() > deadline) throw new Error("the start never failed");
-        await settle(10);
-      }
+      const taken = await deferredFailure(client, profile, starting);
+      expect(String(taken)).toContain("exited with code 3");
+      // That call took the deferred failure: no second server started.
+      expect(spawnCount(root)).toBe(1);
       // The handle still gets that server's own reason.
       await expect(client.hover(starting, file, POS, new AbortController().signal)).rejects.toThrow(
         "exited with code 3",

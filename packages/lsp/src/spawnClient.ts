@@ -177,6 +177,19 @@ export function createSpawnLspClient(
     pruneReplaced();
   }
 
+  /** Keep `reason` itself as the record of the server `entry` was. */
+  function keepReason(entry: ServerEntry, reason: unknown): void {
+    const gone = new GoneNotice();
+    gone.fire(reason);
+    replaced.push({
+      instance: entry.handle.instance,
+      language: entry.handle.language,
+      gone,
+      at: performance.now(),
+    });
+    pruneReplaced();
+  }
+
   /**
    * The error for a call whose server has been replaced since it got its
    * handle, or is gone: the old server's own reason while it is kept, else
@@ -327,14 +340,12 @@ export function createSpawnLspClient(
     if (args.signal?.aborted) throw new Error("aborted");
     if (existing?.unreportedStartError !== undefined) {
       const reason = existing.unreportedStartError;
-      // A `starting` handle for it still gets its reason.
-      keepReplaced(existing);
+      // A `starting` handle for it gets the reason this call gets, not the
+      // exit of the stop that followed.
+      keepReason(existing, reason);
       servers.delete(k);
       throw reason;
     }
-    // A new server replaces it below. A call that still holds a handle to
-    // this one learns why it went.
-    if (existing) keepReplaced(existing);
 
     const [cmd, ...cmdArgs] = args.profile.command;
     if (!cmd) {
@@ -390,6 +401,10 @@ export function createSpawnLspClient(
       openedFiles: new Map(),
       state: "starting",
     };
+    // A new server replaces the crashed one. A call that still holds a
+    // handle to that one learns why it went. Kept only now, once nothing
+    // above can throw, so it is kept once.
+    if (existing) keepReplaced(existing);
     servers.set(k, entry);
 
     // Handlers touch only their own entry: a re-spawned server under the
