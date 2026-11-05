@@ -293,9 +293,10 @@ export function createSpawnLspClient(
 
     // Handlers touch only their own entry: a re-spawned server under the
     // same key is a different entry and stays untouched by an old exit.
-    // A server still starting stays "starting" until its start fails: the
-    // start's own handler marks it crashed together with the error to
-    // report, so no call sees it crashed without that error.
+    // An exit while starting leaves the state at "starting": the start's own
+    // failure handler marks it crashed and stores the error to report. A pipe
+    // that breaks during the start marks it crashed first and the error is
+    // stored later in the same turn, so no call sees it crashed without it.
     const markCrashed = (): void => {
       if (entry.state !== "starting") entry.state = "crashed";
     };

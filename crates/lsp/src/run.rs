@@ -162,7 +162,7 @@ pub async fn lsp(input: Value, session: &LspSessionConfig) -> LspResult {
         Err(e) => {
             return err(ToolError::new(
                 ToolErrorCode::ServerNotAvailable,
-                format!("Failed to spawn {} server: {}", profile.language, e),
+                format!("Failed to start {} server: {}", profile.language, e),
             ));
         }
     };
