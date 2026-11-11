@@ -128,15 +128,15 @@
     "@agent-sh/harness-lsp": "workspace:*",
     "@agent-sh/harness-skill": "workspace:*",
     "@agent-sh/harness-batch": "workspace:*",
-    "typebox": "1.4.3"
+    "typebox": "1.4.5"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "^1.5.0",
     "@types/node": "^26.6.6",
     "@typescript/native": "npm:typescript@^7.0.2",
     "tsup": "^9.0.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "vitest": "^5.0.5",
+    "vitest": "^5.1.0",
     "zod": "^4.6.6"
   },
   "peerDependencies": {
