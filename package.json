@@ -57,7 +57,8 @@
       "ip-address@>=10.2.0": ">=10.7.4 <11",
       "@earendil-works/pi-coding-agent>undici": ">=8.12.2 <9",
       "zod": ">=4.6.6 <5",
-      "@hono/node-server@>=2.0.0 <2.1.6": ">=2.1.8"
+      "@hono/node-server@>=2.0.0 <2.1.6": ">=2.1.8",
+      "hono@>=3.12.0 <4.13.16": ">=4.13.18"
     },
     "packageExtensions": {
       "typescript-language-server": {
